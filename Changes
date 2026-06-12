@@ -1,0 +1,18 @@
+Revision history for PDL-EEG
+
+0.01  2026-06-12
+    - Initial release
+    - PDL::EEG::IO::NihonKohden: read Nihon Kohden EEG-1100C binary files
+      - Confirmed format from real hardware (EEG-1100C, JE-921A amplifier)
+      - Waveform data: uint16 offset binary, 0.09765625 µV/bit
+      - Sampling rate auto-detected from wfmblock header (+0x1A lower 14 bits)
+      - Channel labels from .21E file (CRLF-aware) with DEFAULT_LABELS fallback
+      - BCD timestamp decode (YY/MM/DD HH:MM:SS)
+      - Event parsing from .LOG file (ASCII 6-digit seconds format)
+      - n_samples computed from inter-block gap
+      - Multi-block support (block => N option)
+    - examples/verify_read.pl: step-by-step verification tool
+    - examples/read_nihonkohden.pl: interactive viewer with giza_server sliders
+      - Horizontal slider: time axis scroll
+      - Vertical slider: gain (µV/div)
+      - Decimation for render performance (step_max=5)
