@@ -4,18 +4,19 @@ EEG analysis toolkit for PDL — MNE-Python inspired.
 
 ## Status
 
-Version 0.01 — initial release. Currently implements:
+Version 0.01. Currently implements:
 
 - **`PDL::EEG::IO::NihonKohden`** — read Nihon Kohden EEG-1100C binary files (`.EEG`)
 
-Planned: `PDL::EEG::IO::EDF`, `PDL::EEG::Epochs`, `PDL::EEG::Evoked`, `PDL::EEG::Viewer`
+Planned: `PDL::EEG::IO::EDF`, `PDL::EEG::Evoked`, `PDL::EEG::Viewer`
 
 ## Requirements
 
 - Perl 5.20+
 - PDL 2.080+
-- PDL::Graphics::Cairo (for `--plot`, from [goosh-gh/PDL-Graphics-Cairo](https://github.com/goosh-gh/PDL-Graphics-Cairo))
-- giza_server (for interactive viewer, from [goosh-gh/giza-server](https://github.com/goosh-gh/giza-server))
+- [PDL::Graphics::Cairo](https://github.com/goosh-gh/PDL-Graphics-Cairo) — for interactive viewer and notebook plots
+- [giza-server](https://github.com/goosh-gh/giza-server) — for native-window interactive viewer (optional)
+- [App-PDL-Notebook](https://github.com/goosh-gh/App-PDL-Notebook) — for browser-based notebook viewer (optional)
 
 ## Installation
 
@@ -45,15 +46,32 @@ my $rec = read_nk('patient.EEG');
 my $rec2 = read_nk('patient.EEG', block => 2);
 ```
 
-### Interactive viewer
+### Interactive viewer (giza-server, native window)
 
 ```bash
-perl -Ilib examples/read_nihonkohden.pl patient.EEG --plot
-perl -Ilib examples/read_nihonkohden.pl patient.EEG --plot --block 2 --nch 16 --sec 10
+perl -Ilib examples/read_nihonkohden.pl subject.EEG --plot
+perl -Ilib examples/read_nihonkohden.pl subject.EEG --plot --block 2 --nch 16 --sec 10
 ```
 
 Horizontal slider: time scroll  
 Vertical slider: gain (µV/div)
+
+### Interactive viewer (App-PDL-Notebook, browser)
+
+Full MNE `raw.plot()`-style viewer running inside a notebook cell.
+No giza-server required. ~7 ms/frame with LTTB downsampling.
+
+```perl
+# In a notebook cell:
+use lib '/path/to/PDL-EEG/lib';
+use lib '/path/to/PDL-Graphics-Cairo/lib';
+use PDL;
+local @ARGV = ('patient.EEG');          # omit for 34-ch synthetic demo
+do '/path/to/App-PDL-Notebook/examples/notebook_eeg_raw.pl';
+```
+
+Browser controls: Position (time scroll), Window (ms), Gain (10–1000 µV/div),
+Ch offset (channel scroll), Neg-up toggle.
 
 ### Verify a file
 
@@ -79,5 +97,6 @@ Format knowledge derived from EDFbrowser (GPL-2) used as reference only.
 ## See also
 
 - [goosh-gh/PDL-Graphics-Cairo](https://github.com/goosh-gh/PDL-Graphics-Cairo)
+- [goosh-gh/App-PDL-Notebook](https://github.com/goosh-gh/App-PDL-Notebook)
 - [goosh-gh/giza-server](https://github.com/goosh-gh/giza-server)
 - [goosh-gh/PDL-IO-PNG](https://github.com/goosh-gh/PDL-IO-PNG)
