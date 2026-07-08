@@ -13,7 +13,7 @@ PDL::EEG - EEG analysis toolkit for PDL (MNE-Python inspired)
 
   use PDL::EEG::IO::NihonKohden qw(read_nk);
 
-  my $rec = read_nk('patient.eeg');
+  my $rec = read_nk('subject.eeg');
   # $rec->{data}   [n_ch, n_samples] float32 µV
   # $rec->{fs}     sampling rate Hz
   # $rec->{labels} channel labels

@@ -2,9 +2,8 @@ package PDL::EEG::IO::NihonKohden;
 
 use strict;
 use warnings;
-use Carp qw(croak confess carp);
+use Carp qw(croak confess);
 use Encode qw(decode);
-use POSIX ();
 use PDL;
 
 our $VERSION = '0.01';
@@ -50,7 +49,7 @@ Format knowledge derived from EDFbrowser's nk2edf.cpp by Teunis van Beelen
 =cut
 
 use Exporter 'import';
-our @EXPORT_OK = qw(read_nk nk_layout nk_format_hint block_ranges select_block select_range clock_to_samp);
+our @EXPORT_OK = qw(read_nk nk_layout nk_format_hint);
 
 # ---------------------------------------------------------------------------
 # Sampling rate code → Hz
@@ -409,8 +408,6 @@ sub read_nk {
         all_blocks     => $all_blocks,
         device         => $device,           # e.g. "EEG-1100C V01.00"
         layout         => 'wfmblock',
-        system_reference => $label_override{system_reference},  # e.g. "C3,C4" (.21e [SYSTEM_SETUP])
-        last_pattern     => $label_override{last_pattern},      # recording montage no. (.21e [LASTPATTERN])
         gap_bounds     => \@gap_bounds,       # [[start_samp,end_samp],...] concat coords
         t_block_starts => \@t_block_starts,   # concat start sample of each block
         block_meta     => \@block_meta,       # per-block {start_samp,n_samp,t_start}
@@ -441,14 +438,8 @@ sub _read_wfm_block {
     my $got = read($fh, $buf, $bytes);
     croak "Short read: wanted $bytes bytes, got $got" unless $got == $bytes;
 
-    # Interpret the little-endian uint16 buffer directly into a PDL, the same
-    # way _read_extblock does: no multi-million-element Perl list, no double
-    # blow-up. ~4.5x faster and far lighter on memory at full recording scale.
-    # (On little-endian hosts ushort matches "v"; both reader paths assume LE.)
-    my $u16 = zeroes(ushort, $n_ch, $n_samp);
-    ${ $u16->get_dataref } = substr($buf, 0, $n_ch * $n_samp * 2);
-    $u16->upd_data;
-    my $raw = $u16->double - 0x8000;                     # offset binary → signed
+    my $raw = PDL->new([ unpack "v*", $buf ])->reshape($n_ch, $n_samp);
+    $raw = $raw->double - 0x8000;                        # offset binary → signed µV
     $raw->slice('(-1),:') .= 0.0;                        # PAD channel zero-fill
     my $data = ($raw * 0.09765625)->float;               # fixed µV/bit
 
@@ -541,9 +532,6 @@ sub _read_extblock {
         my $lp = "$base.LOG"; $lp = "$base.log" unless -f $lp;
         @events = _read_log($lp) if -f $lp;
     }
-    # extblock data is gap-removed continuous, so wall-clock event t does not map
-    # to samples; place events by epoch instead (see _attach_epoch_samp).
-    _attach_epoch_samp(\@events, $n_samp, $fs);
 
     close $fh;
 
@@ -560,8 +548,6 @@ sub _read_extblock {
         all_blocks       => ($opts{all_blocks} ? 1 : 0),
         device           => $device,
         layout           => 'extblock',
-        system_reference => $ov{system_reference},   # e.g. "C3,C4" (.21e [SYSTEM_SETUP])
-        last_pattern     => $ov{last_pattern},        # recording montage no. (.21e [LASTPATTERN])
         ch_hw_idx        => \@hw,              # 1-based hardware indices
         ch_indices       => \@hw,             # alias: 1-based ch_idx per label (matches wfmblock)
         stim_index       => $n_ch,            # 1-based; last row
@@ -650,18 +636,6 @@ sub _read_21e {
         s/\r$/\n/;     # CR-only → LF
         chomp;
         if (/^\[([^\]]+)\]/) { $section = uc $1; next }
-        # System-level fields. Keys here are names (not electrode indices), so
-        # they ride along in %elec under string keys and never collide with the
-        # integer electrode lookups; read_nk pulls them out into the record.
-        if ($section eq 'SYSTEM_SETUP' && /^SystemReference=(.+)$/) {
-            (my $v = $1) =~ s/\s+$//;
-            $elec{system_reference} = $v;          # e.g. "C3,C4"
-            next;
-        }
-        if ($section eq 'LASTPATTERN' && /^PATTERN=(-?\d+)/) {
-            $elec{last_pattern} = $1 + 0;          # recording-time display montage no.
-            next;
-        }
         next unless $section eq 'ELECTRODE' || $section eq 'REFERENCE';
         if (/^(\d+)=(.+)$/) {
             my ($key, $val) = ($1 + 0, $2);
@@ -704,14 +678,8 @@ sub _read_log {
             my $entry_off = $lb_addr + 0x0014 + $j * 45;
             my $raw       = _read_bytes($fh, $entry_off, 45);
 
-            my $raw_label = substr($raw, 0, 20);
-            $raw_label =~ s/\x00+$//;                       # trim NUL padding
-            # Nihon Kohden labels are Shift_JIS (CP932). Decode to Unicode so
-            # Japanese task names (e.g. 安静開眼) survive; fall back to the raw
-            # bytes if decoding fails, then strip only control characters.
-            my $label = eval { decode('cp932', $raw_label, Encode::FB_DEFAULT) };
-            $label = $raw_label unless defined $label;
-            $label =~ s/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g; # control chars only
+            my $label = substr($raw, 0, 20);
+            $label =~ s/[\x00-\x1F\x7F-\xFF]//g;
             $label =~ s/\s+$//;
             next unless $label =~ /\S/;
 
@@ -720,68 +688,11 @@ sub _read_log {
             my $t_sec = ($t_str =~ /^(\d{6})$/) ? ($1 + 0)
                       : unpack('v', substr($raw, 20, 2));   # old-format fallback
 
-            # byte 42 (u16 LE) = epoch number * 256 (0-based); +1 -> 1-based epoch.
-            # Used to place events at their true data-sample position (extblock/
-            # EEG-1200A stores gap-removed continuous data, so wall-clock t does
-            # not map to samples; epoch does).
-            my $ep_raw = unpack('v', substr($raw, 42, 2));
-            my $epoch  = int($ep_raw / 256) + 1;
-
-            push @events, { t => $t_sec, label => $label, epoch => $epoch };
+            push @events, { t => $t_sec, label => $label };
         }
     }
     close $fh;
     return @events;
-}
-
-# Attach data-sample position to events from their epoch number.
-# Epoch is a fixed-size acquisition block; a REC START marks a segment boundary
-# and sits at an epoch boundary, so its sample = (epoch-1) * (n_total/max_epoch).
-# Within a segment there are no gaps (wall-clock advances 1:1 with data), so
-# other events (task markers, etc.) are placed at the preceding REC START's
-# sample plus their wall-clock offset from that REC START. This keeps segment
-# boundaries exact while giving markers second-accuracy (matching the vendor's
-# "elapsed/積算時間"), instead of rounding everything to the epoch boundary.
-# Sets $e->{samp} and $e->{t_data}=samp/fs.
-sub _attach_epoch_samp {
-    my ($events, $n_total, $fs) = @_;
-    return unless $events && @$events && $n_total && $fs;
-    my $max_ep = 0;
-    for my $e (@$events) {
-        my $ep = $e->{epoch} || 0;
-        $max_ep = $ep if $ep > $max_ep;
-    }
-    return unless $max_ep > 1;                 # no usable epoch information
-    my $L = $n_total / $max_ep;                # samples per epoch (float)
-
-    my $clamp = sub {
-        my $s = shift;
-        $s = $n_total - 1 if $s > $n_total - 1;
-        $s = 0            if $s < 0;
-        return $s;
-    };
-
-    my $anchor;                                # last REC START { samp, t }
-    for my $e (@$events) {
-        next unless defined $e->{epoch} && $e->{epoch} >= 1;
-        my $is_rec = ($e->{label} // '') =~ /REC\s*START/i;
-        my $s;
-        if ($is_rec) {
-            $s = $clamp->(int(($e->{epoch} - 1) * $L + 0.5));   # epoch boundary
-            $anchor = { samp => $s, t => ($e->{t} // 0) };
-        } elsif ($anchor) {
-            # same segment (events between this and the next REC START): add the
-            # within-segment wall-clock offset (no gaps inside a segment).
-            my $off = (($e->{t} // 0) - $anchor->{t}) * $fs;
-            $off = 0 if $off < 0;
-            $s = $clamp->(int($anchor->{samp} + $off + 0.5));
-        } else {
-            $s = $clamp->(int(($e->{epoch} - 1) * $L + 0.5));   # no anchor yet
-        }
-        $e->{samp}   = $s;
-        $e->{t_data} = $s / $fs;
-    }
-    return;
 }
 
 # ---------------------------------------------------------------------------
@@ -819,177 +730,6 @@ sub _check_device_sig {
 sub _hexdump {
     my ($s) = @_;
     join ' ', map { sprintf '%02X', ord $_ } split //, $s;
-}
-
-# ---------------------------------------------------------------------------
-# Block / segment selection helpers
-# ---------------------------------------------------------------------------
-
-=head2 block_ranges($rec, %opt)
-
-Return the block/segment boundaries of a record as an arrayref of hashrefs
-(0-based, end-exclusive samples):
-
-  [ { index => 0, start => 0,     end => 34000, t_start => "..." },
-    { index => 1, start => 34000, end => 68000, t_start => "..." }, ... ]
-
-Source of the boundaries (option C<source>, default C<'auto'>):
-
-  physical  use the reader's block_meta (real waveform blocks; wfmblock)
-  log       split by ".LOG" "REC START" markers in $rec->{events}
-            (for extblock/EEG-1200A, which is one physical block per file)
-  auto      physical if >1 block, else log, else a single segment
-
-=head2 select_block($rec, $i, %opt)
-
-Return a new record (same contract as read_nk) containing only block/segment
-C<$i> (0-based). Data is sliced, events are filtered to the segment and rebased
-to segment-local time, and per-segment C<t_start> is set. Useful for writing one
-EDF per recording segment.
-
-=cut
-
-sub _add_seconds {
-    my ($tstr, $sec) = @_;
-    return $tstr unless defined $tstr
-        && $tstr =~ /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
-    my $ep = POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900, 0, 0, -1);
-    return $tstr if !defined $ep || $ep < 0;
-    my @lt = localtime($ep + $sec);
-    return POSIX::strftime("%Y-%m-%d %H:%M:%S", @lt);
-}
-
-sub block_ranges {
-    my ($rec, %opt) = @_;
-    croak "block_ranges: need record hashref" unless ref $rec eq 'HASH';
-    my $n_total = eval { $rec->{data}->dim(1) } // 0;
-    my $fs      = $rec->{fs} || 1;
-    my $src     = $opt{source} || 'auto';
-
-    my $meta = $rec->{block_meta} || [];
-    my $use_physical = ($src eq 'physical')
-                    || ($src eq 'auto' && @$meta > 1);
-
-    my @out;
-    if ($use_physical && @$meta) {
-        for my $b (0 .. $#$meta) {
-            my $lo = $meta->[$b]{start_samp};
-            my $ns = $meta->[$b]{n_samp};
-            push @out, { index => $b, start => $lo, end => $lo + $ns,
-                         t_start => $meta->[$b]{t_start} };
-        }
-    } else {
-        # Segment by .LOG "REC START" markers. Prefer the epoch-derived data
-        # sample position ($e->{samp}); fall back to wall-clock t*fs only if no
-        # epoch info (which for gap-removed extblock data would be wrong -> we
-        # then refuse to split; see below).
-        my @starts;
-        my $have_samp = 0;
-        for my $e (@{ $rec->{events} || [] }) {
-            my $lab = ref $e eq 'HASH' ? ($e->{label} // '') : "$e";
-            next unless $lab =~ /REC\s*START/i;
-            if (defined $e->{samp}) { push @starts, $e->{samp}; $have_samp = 1; }
-            else                    { push @starts, int(($e->{t} || 0) * $fs + 0.5); }
-        }
-        my %seen; @starts = grep { !$seen{$_}++ } sort { $a <=> $b } @starts;
-        unshift @starts, 0 unless @starts && $starts[0] == 0;
-        @starts = (0) unless @starts;
-
-        # Without epoch (samp) info, wall-clock starts may exceed the gap-removed
-        # data length; we cannot split reliably, so return a single segment.
-        if (!$have_samp && grep { $_ >= $n_total } @starts) {
-            carp "block_ranges: .LOG times exceed data length and no epoch info "
-               . "(gap-removed data). Returning a single segment.";
-            return [ { index => 0, start => 0, end => $n_total,
-                       t_start => $rec->{t_start} } ];
-        }
-
-        for my $i (0 .. $#starts) {
-            my $lo = $starts[$i];
-            next if $lo >= $n_total;
-            my $hi = $i < $#starts ? $starts[$i + 1] : $n_total;
-            $hi = $n_total if $hi > $n_total;
-            next if $hi <= $lo;
-            push @out, { index => scalar @out, start => $lo, end => $hi,
-                         t_start => _add_seconds($rec->{t_start}, $lo / $fs) };
-        }
-    }
-    return \@out;
-}
-
-sub select_block {
-    my ($rec, $i, %opt) = @_;
-    my $ranges = block_ranges($rec, %opt);
-    croak "select_block: index $i out of range (have " . scalar(@$ranges) . " block(s))"
-        if $i < 0 || $i > $#$ranges;
-    my $r = $ranges->[$i];
-    return select_range($rec, $r->{start}, $r->{end}, t_start => $r->{t_start});
-}
-
-# Extract an arbitrary [$lo, $hi) sample range as a new record (rebased events).
-sub select_range {
-    my ($rec, $lo, $hi, %opt) = @_;
-    my $fs = $rec->{fs} || 1;
-    my $n  = eval { $rec->{data}->dim(1) } // 0;
-    $lo = 0  if $lo < 0;
-    $hi = $n if $hi > $n;
-    croak "select_range: empty/invalid range [$lo,$hi)" if $hi <= $lo;
-    my $len = $hi - $lo;
-
-    my $data = $rec->{data}->slice(":," . $lo . ":" . ($hi - 1))->sever;
-
-    my @events;
-    for my $e (@{ $rec->{events} || [] }) {
-        my $s = defined $e->{samp} ? $e->{samp} : ($e->{t} || 0) * $fs;
-        next unless $s >= $lo && $s < $hi;
-        my %ne = %$e;
-        if (defined $e->{samp}) {
-            $ne{samp}   = $e->{samp} - $lo;
-            $ne{t_data} = $ne{samp} / $fs;
-            $ne{t}      = $ne{samp} / $fs;
-        } else {
-            $ne{t} = ($s - $lo) / $fs;
-        }
-        push @events, \%ne;
-    }
-
-    my $tstart = defined $opt{t_start} ? $opt{t_start}
-               : _add_seconds($rec->{t_start}, $lo / $fs);
-
-    return {
-        %$rec,
-        data             => $data,
-        events           => \@events,
-        t_start          => $tstart,
-        n_blocks         => 1,
-        all_blocks       => 0,
-        gap_bounds       => [],
-        t_block_starts   => [0],
-        n_samp_per_block => [$len],
-        block_meta       => [ { start_samp => 0, n_samp => $len, t_start => $tstart } ],
-    };
-}
-
-# Convert a wall-clock time (seconds from recording start) to a data-sample
-# index, using REC START events as anchors (within a segment, wall-clock and
-# data advance 1:1). Requires events with both {t} and {samp} (epoch-based).
-sub clock_to_samp {
-    my ($rec, $wall_sec) = @_;
-    my $fs = $rec->{fs} || 1;
-    my $n  = eval { $rec->{data}->dim(1) } // 0;
-    my @anch = grep { defined $_->{samp} && defined $_->{t}
-                      && ($_->{label} // '') =~ /REC\s*START/i }
-               @{ $rec->{events} || [] };
-    @anch = sort { $a->{t} <=> $b->{t} } @anch;
-    return int($wall_sec * $fs + 0.5) unless @anch;   # no anchors: assume 1:1
-
-    my $best;
-    for my $a (@anch) { $best = $a if $a->{t} <= $wall_sec; }
-    $best ||= $anch[0];
-    my $s = $best->{samp} + int(($wall_sec - $best->{t}) * $fs + 0.5);
-    $s = 0        if $s < 0;
-    $s = $n - 1   if $n && $s > $n - 1;
-    return $s;
 }
 
 1;

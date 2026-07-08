@@ -4,8 +4,8 @@
 # 実データでの動作確認スクリプト。make test とは独立して使う。
 #
 # Usage:
-#   perl -Ilib examples/verify_read.pl patient.eeg
-#   perl -Ilib examples/verify_read.pl patient.eeg --plot   # Cairo でプロット
+#   perl -Ilib examples/verify_read.pl subject.eeg
+#   perl -Ilib examples/verify_read.pl subject.eeg --plot   # Cairo でプロット
 #   perl -Ilib examples/verify_read.pl                      # 合成データで確認
 
 use strict;
@@ -28,7 +28,7 @@ unless ($file && -f $file) {
         $file = $synthetic;
         $fs //= 1000;
     } else {
-        die "Usage: $0 patient.eeg [--fs 1000] [--plot]\n"
+        die "Usage: $0 subject.eeg [--fs 1000] [--plot]\n"
           . "  (Or run 'perl t/mk_synthetic_nk.pl' first to generate synthetic data)\n";
     }
 }

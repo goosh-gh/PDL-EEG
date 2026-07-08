@@ -1,201 +1,102 @@
-# PDL::EEG
+# P:EEG08 — NK → EDF, and headbox-independent trigger/label resolution
 
-EEG analysis toolkit for PDL — MNE-Python inspired.
+## What ships here
 
-## Status
+| File | Package | Role |
+|------|---------|------|
+| `PDL/EEG/IO/EDF.pm` | `PDL::EEG::IO::EDF` | Write EDF / EDF+ from a `read_nk` record |
+| `PDL/EEG/IO/NihonKohden.pm` | `…::NihonKohden` | Reader, **patched**: `label_map` option + `ch_indices` return |
+| `PDL/EEG/IO/NihonKohden/PTN.pm` | `…::NihonKohden::PTN` | Parse Neurofax `.PTN` montage files (1100C + 1200A) |
+| `PDL/EEG/IO/NihonKohden/Montage.pm` | `…::NihonKohden::Montage` | `.LOG` montage + `.PTN` + signal → `label_map` |
+| `PDL/EEG/Signal.pm` | `PDL::EEG::Signal` | **Device-independent** square-pulse/TTL detector |
+| `examples/nk_to_edf.pl` | — | NK → EDF CLI |
+| `examples/nk_resolve_labels.pl` | — | Resolve trigger labels, optionally write EDF |
+| `examples/parse_ptn.pl` | — | Dump one `.PTN` montage |
+| `t/04_edf.t` | — | EDF writer round-trip test |
 
-Version 0.02. Currently implements:
+Naming reflects responsibility: the generic TTL detector lives in
+`PDL::EEG::Signal` (no vendor knowledge); everything that reads Nihon Kohden
+sidecars lives under `PDL::EEG::IO::NihonKohden::*`.
 
-- **`PDL::EEG::IO::NihonKohden`** — read Nihon Kohden EEG binary files (`.EEG`).
-  Both on-disk layouts are supported and auto-selected from the file's format
-  signature:
-  - **`wfmblock`** (legacy) — `EEG-1100A/B/C`, `EEG-2100`, `QI-403A`, `DAE-2100D`
-  - **`extblock`** (newer) — `EEG-1200A` (e.g. the EEG-1290 recorder / JE-92NX headbox)
+## The core problem (why this is not just "read the file")
 
-Planned: `PDL::EEG::IO::EDF`, `PDL::EEG::Evoked`, `PDL::EEG::Epochs`, `PDL::EEG::Viewer`.
+Trigger/DC channel names are **not** derivable from the recording format:
 
-## Supported Nihon Kohden formats
+- The same trigger line is `DC03–06` on the 1100C headbox (JE-921A) and
+  `DC01–04` on the 1200A. Searching for a fixed name is a landmine.
+- The bundled `.21e` is a generic template; its DC block does not match every
+  headbox's wiring.
+- The authoritative display names live in the **montage** (`.PTN`), which labels
+  the four TTL lines `TrigBit0/2/4/8`; the electrode table separately calls them
+  `DCxx`. Same physical lines, two labels.
+- **Which recorded `ch_idx` carries a trigger is only visible in the signal.**
+  The `.PTN` gives the trigger *count and names* but stores `G1=0` for them, so
+  it does **not** encode their channel index.
 
-The on-disk layout is chosen from the **format signature** at offset `0x0000`,
-never from the physical recorder model (which is not stored in the file):
+No single source is sufficient — the resolver combines all three.
 
-| Layout | Signature examples | Channel info location |
-|--------|--------------------|-----------------------|
-| `wfmblock` | `EEG-1100C V01.00`, `EEG-2100 V01.00`, `QI-403A V01.00`, `DAE-2100D V01.30` | inside the wfmblock |
-| `extblock` | `EEG-1200A V01.00` | extended-block chain via `ext_address` (`0x03EE`) |
+## Pipeline
 
-`read_nk()` dispatches automatically. For unseen signatures it falls back to a
-structural check (`ext_address` non-zero ⇒ `extblock`), so future firmware
-variants (e.g. `EEG-1200B/C`, or an `EEG-1214` migrating to `EEG-1200A`) read
-without code changes; signatures that are not Nihon Kohden are rejected.
+```
+.LOG  ──montage_from_log──▶ "IIA"
+                              │  find the .PTN whose NAME == "IIA"
+.PTN ──parse_ptn──▶ trigger names [TrigBit0,2,4,8]  (count = 4)
+                              │
+.EEG data ──detect_square_pulses(n=4)──▶ ch_idx that actually pulse
+                              │  (needs the FULL recording; run all_blocks=>1)
+                              ▼
+        zip names(montage order) ⟷ triggers(ch_idx order)
+                              ▼
+              label_map { ch_idx => name }   →  read_nk(label_map => …)
+```
 
-Two helpers are also exported:
+### Usage
 
 ```perl
-use PDL::EEG::IO::NihonKohden qw(read_nk nk_layout nk_format_hint);
+use PDL::EEG::IO::NihonKohden          qw(read_nk);
+use PDL::EEG::IO::NihonKohden::Montage qw(resolve_labels);
+use PDL::EEG::IO::EDF                  qw(write_edf);
 
-my ($sig, $layout, $how) = nk_layout('subjct.EEG');   # authoritative (reads the file)
-# e.g. ("EEG-1200A V01.00", "extblock", "table")
+my $rec = read_nk('YJ0394VB.EEG', all_blocks => 1);
+my $r   = resolve_labels($rec, ptn_dir => 'YJ0394VB.PTN');
+#  $r->{montage}   => "IIA"
+#  $r->{label_map} => { 45=>'TrigBit0', 46=>'TrigBit2', 47=>'TrigBit4', 74=>'TrigBit8' }
 
-my ($guess_sig, $guess_layout, $note) = nk_format_hint('EEG-1290');
-# NON-authoritative hint from a recorder model name; always confirm via nk_layout()
+my $rec2 = read_nk('YJ0394VB.EEG', all_blocks=>1, label_map => $r->{label_map});
+write_edf($rec2, 'YJ0394VB.edf');
 ```
 
-> **Model vs. format.** A recorder can change the format it emits after a
-> software update, so `nk_format_hint()` is only a pre-flight guess. The
-> signature in the file always wins.
+Or one shot: `perl examples/nk_resolve_labels.pl YJ0394VB.EEG --write YJ0394VB.edf`
 
-## Requirements
-
-- Perl 5.20+
-- PDL 2.080+
-- [PDL::Graphics::Cairo](https://github.com/goosh-gh/PDL-Graphics-Cairo) — for interactive viewer and notebook plots
-- [giza-server](https://github.com/goosh-gh/giza-server) — for native-window interactive viewer (optional)
-- [App-PDL-Notebook](https://github.com/goosh-gh/App-PDL-Notebook) — for browser-based notebook viewer (optional)
-
-## Installation
-
-```bash
-perl Makefile.PL
-make
-make testdata   # generate synthetic test data
-make test
-make install
-```
-
-## Usage
+To use your own names (physical box labels rather than montage labels):
 
 ```perl
-use PDL::EEG::IO::NihonKohden qw(read_nk);
-my $rec = read_nk('subjct.EEG');
-# $rec->{data}      [n_ch, n_samples] float32 µV
-# $rec->{fs}        sampling rate Hz (auto-detected)
-# $rec->{labels}    channel names (from .21E; last row is PAD/STIM marker)
-# $rec->{t_start}   "YYYY-MM-DD HH:MM:SS"
-# $rec->{events}    [{t => $sec, label => $str}, ...]  (.LOG session annotations)
-# $rec->{gains}     [n_ch] µV/bit
-# $rec->{device}    "EEG-1100C V01.00" / "EEG-1200A V01.00"
-# $rec->{n_blocks}  number of waveform blocks
-# extblock also returns: layout, ch_hw_idx, stim_index, t_block_starts, n_samp_per_block
-
-# Read a specific block (wfmblock files may hold several)
-my $rec2 = read_nk('subjct.EEG', block => 2);
+resolve_labels($rec, ptn_dir=>'…', names => [qw(DC03 DC04 DC05 DC06)]);
+# or pin by hand, highest priority:
+read_nk($f, all_blocks=>1, label_map => { 45=>'DC03',46=>'DC04',47=>'DC05',74=>'DC06' });
 ```
 
-### Channel labels
+## Honest caveats
 
-Labels come from the `.21E` file. Names absent from `[ELECTRODE]` but present in
-`[REFERENCE]` (the amplifier's reference derivations) are filled in as a
-fallback, and Nihon Kohden's `$`-prefixed reference names are normalized to a
-Perl/filename-safe, collision-free `_ref` suffix:
+- **Full recording required for detection.** Triggers must actually fire to the
+  rail to separate cleanly from EEG; run `all_blocks=>1`. Over a short window
+  where a bit never toggles, that line won't be detected.
+- **Name↔channel order is an assumption.** Montage trigger names (slot order)
+  are zipped onto detected triggers sorted by ascending `ch_idx`. That matches
+  the acquisition order here, but verify once per headbox; `label_map` overrides.
+- **Trigger→ch_idx is not in any file** — it comes from the signal. The `.PTN`
+  only supplies names/count.
+- **Absolute DC µV is not calibrated here.** Trigger *edges* (hence ERP epoching)
+  are gain-independent, so this doesn't matter for event extraction. Matching the
+  vendor's 100 mV-scale display would need a one-point calibration.
+- **Export-time montage is not recoverable** from the files (`.reg`
+  `DISPLAY_USE_LAST_PATTERN=0`). The *recording* montage (from `.LOG`) is, and is
+  what this pipeline uses.
 
-| in `.21E` | reported label | meaning |
-|-----------|----------------|---------|
-| `A1` (electrode) | `A1` | A1 ear electrode |
-| `$A1` (reference) | `A1_ref` | A1 used as reference input |
-| `$AV` | `AV_ref` | average reference |
+## Patch applied to `NihonKohden.pm`
 
-The last channel is the hardware marker: `PAD` (wfmblock, zero-filled) or `STIM`
-(extblock, raw marker codes).
-
-### Stimulus triggers
-
-Per-trial stimulus triggers are recorded as **TTL levels on the DC channels**,
-not in `.LOG` (which holds only session annotations) and not on the `STIM`
-marker channel. The DC jack numbering differs by format:
-
-| Format | Trigger DC channels |
-|--------|---------------------|
-| `EEG-1100C` | `DC03`–`DC06` |
-| `EEG-1200A` | `DC01`–`DC04` |
-
-`read_nk()` passes the `.21E` names through unchanged, so each file reports the
-correct DC labels.
-
-### Interactive viewer (giza-server, native window)
-
-```bash
-perl -Ilib examples/read_nihonkohden.pl subject.EEG --plot
-perl -Ilib examples/read_nihonkohden.pl subject.EEG --plot --block 2 --sec 10
-```
-
-Options:
-
-- `--sec S` — seconds per screen (default 10)
-- `--nch N` — number of channels (default 8; ignored if `--chans`)
-- `--uv U` — µV per division for EEG traces (default 100)
-- `--chans LIST` — comma-separated channel **names**, in order
-  (e.g. `--chans Fp1,Cz,Pz,DC01,DC02,STIM`; any label, incl. DC/STIM/`*_ref`)
-- `--aux MODE` — scaling for aux channels (`DC*` / `STIM` / `PAD` / `COM` /
-  `*_ref` / `BN*` / `Pulse` / `CO2` …):
-  - `same` (default) — draw as-is at the EEG scale; TTL may overlap neighbours
-    (often useful for lining a trigger up against the EEG)
-  - `auto` — auto-scale each aux channel to its own slot (TTL squares stay
-    visible, no overlap)
-  - `<N>` — give aux channels a fixed `N` µV/div (e.g. `--aux 2000`)
-
-Horizontal slider: time scroll · Vertical slider: EEG gain (µV/div).
-EEG traces are blue, aux channels red.
-
-### Interactive viewer (App-PDL-Notebook, browser)
-
-Full MNE `raw.plot()`-style viewer running inside a notebook cell.
-No giza-server required. ~7 ms/frame with LTTB downsampling.
-
-```perl
-# In a notebook cell:
-use lib '/path/to/PDL-EEG/lib';
-use lib '/path/to/PDL-Graphics-Cairo/lib';
-use PDL;
-local @ARGV = ('subjct.EEG');          # omit for synthetic demo
-do '/path/to/App-PDL-Notebook/examples/notebook_eeg_raw.pl';
-```
-
-Browser controls: Position (time scroll), Window (ms), Gain (10–1000 µV/div),
-Ch offset (channel scroll), Neg-up toggle.
-
-### Verify a file
-
-```bash
-perl -Ilib examples/verify_read.pl subjct.EEG
-```
-
-## Format notes
-
-Confirmed from real hardware: EEG-1100C (JE-921A amplifier) and EEG-1290
-(JE-92NX headbox, `EEG-1200A` format).
-
-Common to both layouts:
-
-- ADC: uint16 offset binary, center `0x8000`; `µV = (raw − 32768) × gain`
-- Sampling rate: lower 14 bits of the u16 at `data_block+0x1A`
-- Signature `0x0000`; control-block list at `0x0091`/`0x0092`; `ext_address` at `0x03EE`
-
-`wfmblock` (EEG-1100C):
-
-- Channel table: 10-byte entries at `wfmblock+0x2F`; data start `wfmblock+0x171`
-- Gain: fixed `0.09765625 µV/bit`
-
-`extblock` (EEG-1200A):
-
-- Channels via chain `ext → ext+18 → +20`; count at `eb3+68`, indices at
-  `eb3+72+i*10`; data start `eb3+72+(n_ch−1)*10`
-- Sample-interleaved; `n_samples` computed from file size
-- Per-channel gain: EEG/micro `0.09765624 µV/bit`, DC/other `0.36629984` (mV range);
-  the trailing `STIM` marker channel is raw
-
-Events: 6-digit ASCII seconds in `.LOG` (session annotations; Shift-JIS labels
-supported). Per-trial triggers are on the DC channels (see above).
-
-## License
-
-Same terms as Perl itself (Artistic License 2.0 or GPL-1+).
-Format knowledge derived from EDFbrowser (GPL-2) and Brainstorm's `in_fopen_nk.m`
-used as reference only; this is a clean-room Perl implementation.
-
-## See also
-
-- [goosh-gh/PDL-Graphics-Cairo](https://github.com/goosh-gh/PDL-Graphics-Cairo)
-- [goosh-gh/App-PDL-Notebook](https://github.com/goosh-gh/App-PDL-Notebook)
-- [goosh-gh/giza-server](https://github.com/goosh-gh/giza-server)
-- [goosh-gh/PDL-IO-PNG](https://github.com/goosh-gh/PDL-IO-PNG)
+Minimal, additive:
+- `label_map => \%h` option (keyed by 1-based `ch_idx`), highest priority above
+  `.21e` and `DEFAULT_LABELS`, in both the wfmblock and extblock label loops.
+- `ch_indices => \@idx` in the return of both layouts (extblock aliases the
+  existing `ch_hw_idx`). Needed to map detector positions ↔ `ch_idx`.

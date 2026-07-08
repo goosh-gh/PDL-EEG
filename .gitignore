@@ -8,9 +8,19 @@ pm_to_blib
 *.bs
 download/
 
+# test datas
+./JJ0090J6.edf.ascii_21_376.mul
+./JJ0090J6.21_376.ascii_whole_21_376.mul
+
 # Generated test data (run: make testdata)
 t/data/
 
 # Editor
 *.swp
 .DS_Store
+._*
+__MACOSX/
+*~
+
+
+
