@@ -1,102 +1,162 @@
-# P:EEG08 — NK → EDF, and headbox-independent trigger/label resolution
+# PDL::EEG — Nihon Kohden / EDF / BESA EEG toolkit
 
-## What ships here
+Read Nihon Kohden Neurofax recordings in PDL, resolve headbox-independent
+trigger/channel labels, re-reference (incl. balanced non-cephalic), and export
+to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 
-| File | Package | Role |
-|------|---------|------|
-| `PDL/EEG/IO/EDF.pm` | `PDL::EEG::IO::EDF` | Write EDF / EDF+ from a `read_nk` record |
-| `PDL/EEG/IO/NihonKohden.pm` | `…::NihonKohden` | Reader, **patched**: `label_map` option + `ch_indices` return |
-| `PDL/EEG/IO/NihonKohden/PTN.pm` | `…::NihonKohden::PTN` | Parse Neurofax `.PTN` montage files (1100C + 1200A) |
-| `PDL/EEG/IO/NihonKohden/Montage.pm` | `…::NihonKohden::Montage` | `.LOG` montage + `.PTN` + signal → `label_map` |
-| `PDL/EEG/Signal.pm` | `PDL::EEG::Signal` | **Device-independent** square-pulse/TTL detector |
-| `examples/nk_to_edf.pl` | — | NK → EDF CLI |
-| `examples/nk_resolve_labels.pl` | — | Resolve trigger labels, optionally write EDF |
-| `examples/parse_ptn.pl` | — | Dump one `.PTN` montage |
-| `t/04_edf.t` | — | EDF writer round-trip test |
+## Requirements
 
-Naming reflects responsibility: the generic TTL detector lives in
-`PDL::EEG::Signal` (no vendor knowledge); everything that reads Nihon Kohden
-sidecars lives under `PDL::EEG::IO::NihonKohden::*`.
+- Perl ≥ 5.36 and [PDL](https://pdl.perl.org/) (tested against PDL 2.085).
+- On macOS/MacPorts, build Cocoa-dependent extras with
+  `./configure CC=clang OBJC=clang PKG_CONFIG=/opt/local/bin/pkg-config`.
+- The readers assume a **little-endian** host (Apple Silicon, x86-64, ARM64 all
+  qualify); binary buffers are interpreted directly as native `ushort`/`short`.
 
-## The core problem (why this is not just "read the file")
+## Modules
 
-Trigger/DC channel names are **not** derivable from the recording format:
+| Package | Role |
+|---------|------|
+| `PDL::EEG::IO::NihonKohden` | Reader for `.EEG` (EEG-1100C `wfmblock` + EEG-1200A `extblock`). Options: `all_blocks`, `block`, `label_map`. Returns `data [n_ch,n_samp]` µV, `fs`, `labels`, `t_start`, `events`, `gains`, `t_block_starts`, `gap_bounds`, `device`, `layout`, `system_reference`, `last_pattern`. |
+| `PDL::EEG::IO::NihonKohden::PTN` | Parse Neurofax `.PTN` montage files (1100C + 1200A). |
+| `PDL::EEG::IO::NihonKohden::Montage` | `.LOG` montage name + `.PTN` + signal → `label_map`; `resolve_labels`. |
+| `PDL::EEG::IO::EDF` | `write_edf` (EDF / EDF+C) and `read_edf` (round-trips the `read_nk` contract); `clean_edf_label` normalises EDF+ signal labels. |
+| `PDL::EEG::IO::BESA::ASCII` | `write_mul` — BESA ASCII multiplexed (`.mul`) export. |
+| `PDL::EEG::Derivation` | `derive` (general linear derivation `y = M·x`), `bne` (balanced non-cephalic re-reference), `rereference` (single/linked/average). |
+| `PDL::EEG::Signal` | Device-independent square-pulse / TTL detector. |
 
-- The same trigger line is `DC03–06` on the 1100C headbox (JE-921A) and
-  `DC01–04` on the 1200A. Searching for a fixed name is a landmine.
-- The bundled `.21e` is a generic template; its DC block does not match every
-  headbox's wiring.
+## Command-line tools
+
+| Tool | Role |
+|------|------|
+| `examples/nk_to_edf.pl` | NK `.EEG` → EDF/EDF+ |
+| `examples/nk_to_mul.pl` | NK `.EEG` → BESA `.mul` (`--cut`, `--cut-clock`, `--suffix`, `--bne`) |
+| `examples/edf_to_mul.pl` | EDF → BESA `.mul` (`--chans`, `--cut`, `--cut-clock`, `--suffix`, `--bne`) |
+| `examples/nk_resolve_labels.pl` | Resolve trigger labels, optionally write EDF |
+| `examples/parse_ptn.pl` | Dump one `.PTN` montage |
+| `xt/smoke_bne.pl` | Author smoke test: `--bne` on a real `.EEG`/`.edf` |
+
+## Quick start
+
+```perl
+use PDL::EEG::IO::NihonKohden qw(read_nk);
+use PDL::EEG::IO::EDF         qw(write_edf);
+use PDL::EEG::IO::BESA::ASCII qw(write_mul);
+use PDL::EEG::Derivation      qw(bne);
+
+my $rec = read_nk('JJ0090J6.EEG', all_blocks => 1);   # data[n_ch,n_samp] µV
+write_edf($rec, 'out.edf');                            # EDF+C, events → annotations
+write_mul($rec, 'out.mul');                            # BESA ASCII multiplexed
+
+# balanced non-cephalic re-reference, then export
+my $bn = bne($rec, prop => 0.5, suffix => '-BN');      # y = x − (p·BN1 + (1−p)·BN2)
+write_mul($bn, 'out_bne.mul');
+```
+
+### BESA `.mul` export (CLI)
+
+```
+perl -Ilib examples/nk_to_mul.pl  JJ0090J6.EEG
+perl -Ilib examples/edf_to_mul.pl JJ0090J6.edf --suffix -BN
+perl -Ilib examples/nk_to_mul.pl  JJ0090J6.EEG --cut "21-376:b0b1_21_376"
+perl -Ilib examples/nk_to_mul.pl  JJ0090J6.EEG --bne          # re-reference to BNE
+```
+
+- `--cut a-b[:name],…` writes one `.mul` per range in data-coordinate seconds;
+  `--cut-clock HH:MM:SS-HH:MM:SS[:name]` uses wall-clock (continuous recordings).
+- EDF+ labels are cleaned on the way in (`EEG Fp1-Ref` → `Fp1`, `POL DC01` →
+  `DC01`, `$A1` → `A1_ref`), so the `.mul` label row is whitespace-free and its
+  token count matches `Channels=`.
+- The dedicated **Trigger** channel is written as a column but **not counted in
+  `Channels=`** (matching the vendor export; pass `count_trigger => 1` to
+  include it).
+
+### Re-referencing / balanced non-cephalic (BNE)
+
+Nihon Kohden acquires against a system reference (`Avr(C3,C4)`; see
+`$rec->{system_reference}`), so a recorded channel is `x_i = s_i − s_ref`.
+Re-referencing to `r = p·BN1 + (1−p)·BN2` gives `y_i = x_i − (p·BN1 + (1−p)·BN2)`;
+because the weights sum to 1, the acquisition reference **cancels exactly** and
+need not be known. `bne()` auto-detects BN1/BN2, drops them from the output,
+passes DC/Trigger through unchanged, and tags re-referenced channels `-BN`.
+
+`--bne` on the CLIs is **off by default** (data written as recorded). When used,
+provenance is recorded in the `.mul` header as `SegmentName=BNE_prop<value>`
+(a standard BESA field). Default `prop = 0.5` — the BN balance is applied in
+analog hardware at electrode application, so 0.5 means "no extra digital
+re-balance"; other values apply one.
+
+## Trigger / channel-label resolution (headbox-independent)
+
+Trigger/DC channel names are **not** derivable from the recording format alone:
+
+- The same trigger line is `DC03–06` on the 1100C headbox and `DC01–04` on the
+  1200A; a fixed-name search is a landmine.
 - The authoritative display names live in the **montage** (`.PTN`), which labels
-  the four TTL lines `TrigBit0/2/4/8`; the electrode table separately calls them
-  `DCxx`. Same physical lines, two labels.
-- **Which recorded `ch_idx` carries a trigger is only visible in the signal.**
-  The `.PTN` gives the trigger *count and names* but stores `G1=0` for them, so
-  it does **not** encode their channel index.
+  the four TTL lines `TrigBit0/2/4/8`; the electrode table calls them `DCxx`.
+- **Which recorded `ch_idx` carries a trigger is only visible in the signal** —
+  the `.PTN` gives the count/names but stores `G1=0`, not the channel index.
 
-No single source is sufficient — the resolver combines all three.
-
-## Pipeline
+`resolve_labels` combines all three:
 
 ```
 .LOG  ──montage_from_log──▶ "IIA"
-                              │  find the .PTN whose NAME == "IIA"
-.PTN ──parse_ptn──▶ trigger names [TrigBit0,2,4,8]  (count = 4)
-                              │
-.EEG data ──detect_square_pulses(n=4)──▶ ch_idx that actually pulse
-                              │  (needs the FULL recording; run all_blocks=>1)
-                              ▼
+.PTN  ──parse_ptn────────▶ trigger names [TrigBit0,2,4,8] (count = 4)
+.EEG  ──detect_square_pulses(n=4)──▶ ch_idx that actually pulse (needs all_blocks)
         zip names(montage order) ⟷ triggers(ch_idx order)
-                              ▼
-              label_map { ch_idx => name }   →  read_nk(label_map => …)
+              → label_map { ch_idx => name } → read_nk(label_map => …)
 ```
 
-### Usage
-
 ```perl
-use PDL::EEG::IO::NihonKohden          qw(read_nk);
 use PDL::EEG::IO::NihonKohden::Montage qw(resolve_labels);
-use PDL::EEG::IO::EDF                  qw(write_edf);
-
-my $rec = read_nk('YJ0394VB.EEG', all_blocks => 1);
-my $r   = resolve_labels($rec, ptn_dir => 'YJ0394VB.PTN');
-#  $r->{montage}   => "IIA"
-#  $r->{label_map} => { 45=>'TrigBit0', 46=>'TrigBit2', 47=>'TrigBit4', 74=>'TrigBit8' }
-
-my $rec2 = read_nk('YJ0394VB.EEG', all_blocks=>1, label_map => $r->{label_map});
-write_edf($rec2, 'YJ0394VB.edf');
+my $r = resolve_labels($rec, ptn_dir => 'YJ0394VB.PTN');
+# $r->{montage} "IIA"; $r->{label_map} { 45=>'TrigBit0', … }
+my $rec2 = read_nk($f, all_blocks=>1, label_map => $r->{label_map});
 ```
 
-Or one shot: `perl examples/nk_resolve_labels.pl YJ0394VB.EEG --write YJ0394VB.edf`
+Or one shot: `perl examples/nk_resolve_labels.pl YJ0394VB.EEG --write YJ0394VB.edf`.
 
-To use your own names (physical box labels rather than montage labels):
+## File-format reference
 
-```perl
-resolve_labels($rec, ptn_dir=>'…', names => [qw(DC03 DC04 DC05 DC06)]);
-# or pin by hand, highest priority:
-read_nk($f, all_blocks=>1, label_map => { 45=>'DC03',46=>'DC04',47=>'DC05',74=>'DC06' });
+`docs/nihon_kohden_files.md` documents every file in a Neurofax recording
+bundle (`.EEG/.21E/.LOG/.CN3/.PTN/.bam/…`) and what each carries, including
+where the system reference and per-segment display montage live.
+
+## Tests
+
 ```
+make test        # 11 files, ~185 subtests
+```
+
+`t/01_nihonkohden` `t/02_edf` (write + read_edf round-trip) `t/03_ptn`
+`t/04_signal` `t/05_montage` `t/07_blocks` `t/08_epoch` `t/09_i18n`
+`t/10_besa_ascii` `t/11_edf_to_mul` `t/12_derivation`.
+
+`xt/smoke_bne.pl FILE.EEG|FILE.edf` is an author test that runs a converter with
+and without `--bne` on a real recording and checks structural invariants.
+
+## Performance
+
+Binary I/O interprets buffers directly through PDL's data pointer rather than
+building multi-million-element Perl lists: the `wfmblock`/`extblock` readers and
+`read_edf`/`write_edf` all use `get_dataref` byte copies, and `write_mul`
+formats each flushed block with a single `sprintf`. These keep large-recording
+conversion memory-bounded and several times faster than the naïve approach.
 
 ## Honest caveats
 
-- **Full recording required for detection.** Triggers must actually fire to the
-  rail to separate cleanly from EEG; run `all_blocks=>1`. Over a short window
-  where a bit never toggles, that line won't be detected.
-- **Name↔channel order is an assumption.** Montage trigger names (slot order)
-  are zipped onto detected triggers sorted by ascending `ch_idx`. That matches
-  the acquisition order here, but verify once per headbox; `label_map` overrides.
-- **Trigger→ch_idx is not in any file** — it comes from the signal. The `.PTN`
-  only supplies names/count.
-- **Absolute DC µV is not calibrated here.** Trigger *edges* (hence ERP epoching)
-  are gain-independent, so this doesn't matter for event extraction. Matching the
-  vendor's 100 mV-scale display would need a one-point calibration.
-- **Export-time montage is not recoverable** from the files (`.reg`
-  `DISPLAY_USE_LAST_PATTERN=0`). The *recording* montage (from `.LOG`) is, and is
-  what this pipeline uses.
-
-## Patch applied to `NihonKohden.pm`
-
-Minimal, additive:
-- `label_map => \%h` option (keyed by 1-based `ch_idx`), highest priority above
-  `.21e` and `DEFAULT_LABELS`, in both the wfmblock and extblock label loops.
-- `ch_indices => \@idx` in the return of both layouts (extblock aliases the
-  existing `ch_hw_idx`). Needed to map detector positions ↔ `ch_idx`.
+- **Full recording required for trigger detection.** Triggers must fire to the
+  rail to separate from EEG; run `all_blocks=>1`. A line that never toggles in
+  the window won't be detected.
+- **Name↔channel order is an assumption.** Montage trigger names are zipped onto
+  detected triggers sorted by ascending `ch_idx`; verify once per headbox.
+  `label_map` overrides.
+- **The BNE balance ratio is not stored in the recording.** It is applied in
+  analog hardware (a potentiometer at electrode application), so no file in the
+  bundle carries a digital ratio; `bne()` therefore takes `prop` as a parameter
+  (default 0.5). Verified exhaustively across `.21E/.LOG/.CN3/.11D/.bam/.EEG`
+  header and all 36 `.PTN` montages.
+- **Per-segment display montage lives in `.CN3`**; the *recording* montage name
+  is in `.LOG`/`.21E [LASTPATTERN]`. The *export-time* review montage is not
+  recoverable from the files.
+- **Absolute DC µV is not calibrated.** Trigger *edges* (hence ERP epoching) are
+  gain-independent, so this does not affect event extraction.
