@@ -26,3 +26,4 @@ __MACOSX/
 
 !t/data/
 !t/data/**
+*.bak
