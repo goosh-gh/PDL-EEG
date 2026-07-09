@@ -28,11 +28,11 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 
 | Tool | Role |
 |------|------|
-| `examples/nk_to_edf.pl` | NK `.EEG` → EDF/EDF+ |
+| `examples/read_nihonkohden.pl` | Interactive viewer (`--block/--sec/--nch/--chans/--aux`, optional Cairo plot); dispatch is inside `read_nk`, so it needs no format knowledge |
+| `examples/nk_to_edf.pl` | NK `.EEG` → EDF/EDF+ (`--subject`, `--equipment`, `--allblocks`) |
 | `examples/nk_to_mul.pl` | NK `.EEG` → BESA `.mul` (`--cut`, `--cut-clock`, `--suffix`, `--bne`) |
 | `examples/edf_to_mul.pl` | EDF → BESA `.mul` (`--chans`, `--cut`, `--cut-clock`, `--suffix`, `--bne`) |
-| `examples/nk_resolve_labels.pl` | Resolve trigger labels, optionally write EDF |
-| `examples/parse_ptn.pl` | Dump one `.PTN` montage |
+| `xt/verify_read.pl` | Real-data (or synthetic) `read_nk` sanity check, independent of `make test` |
 | `xt/smoke_bne.pl` | Author smoke test: `--bne` on a real `.EEG`/`.edf` |
 
 ## Quick start
@@ -113,7 +113,9 @@ my $r = resolve_labels($rec, ptn_dir => 'YJ0394VB.PTN');
 my $rec2 = read_nk($f, all_blocks=>1, label_map => $r->{label_map});
 ```
 
-Or one shot: `perl examples/nk_resolve_labels.pl YJ0394VB.EEG --write YJ0394VB.edf`.
+`resolve_labels` is an API in `PDL::EEG::IO::NihonKohden::Montage` (there is no
+dedicated CLI). Pass `names => [qw(DC03 DC04 DC05 DC06)]` to use physical box
+labels instead of the montage's `TrigBit*` names, or pin `label_map` by hand.
 
 ## File-format reference
 
@@ -124,12 +126,12 @@ where the system reference and per-segment display montage live.
 ## Tests
 
 ```
-make test        # 11 files, ~185 subtests
+make test        # 12 files (t/06 reserved/skipped), ~185 subtests
 ```
 
 `t/01_nihonkohden` `t/02_edf` (write + read_edf round-trip) `t/03_ptn`
-`t/04_signal` `t/05_montage` `t/07_blocks` `t/08_epoch` `t/09_i18n`
-`t/10_besa_ascii` `t/11_edf_to_mul` `t/12_derivation`.
+`t/04_signal` `t/05_montage` `t/06_reserved` (skip: reserved) `t/07_blocks`
+`t/08_epoch` `t/09_i18n` `t/10_besa_ascii` `t/11_edf_to_mul` `t/12_derivation`.
 
 `xt/smoke_bne.pl FILE.EEG|FILE.edf` is an author test that runs a converter with
 and without `--bne` on a real recording and checks structural invariants.
