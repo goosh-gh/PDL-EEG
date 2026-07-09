@@ -1,0 +1,9 @@
+# Nihon Kohden binary fixtures: never touch bytes
+t/data/** binary
+*.eeg  binary
+*.EEG  binary
+*.PTN  binary
+*.LOG  binary
+*.21E  binary
+*.bam  binary
+*.CN3  binary
