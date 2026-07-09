@@ -21,7 +21,7 @@ PDL::EEG::Derivation - Linear channel derivations (re-reference, bipolar, ...)
   my $rec = read_nk('JJ0090J6.EEG', all_blocks => 1);
 
   # Balanced non-cephalic (BNE) re-reference: y = x - (prop*BN1 + (1-prop)*BN2)
-  my $bn = bne($rec, prop => 0.6, suffix => '-BN');   # BN1=V, BN2=S
+  my $bn = bne($rec, prop => 0.5, suffix => '-BN');   # BN1=V, BN2=S
 
   # ...or a general linear derivation y = M x  (M given as rows of weights):
   my $bip = derive($rec, [[1,-1, 0], [0,1,-1]], ['Fp1-Fp2','Fp2-F3']);
@@ -103,7 +103,7 @@ sub derive {
 
 Balanced non-cephalic (BNE) re-reference. Options:
 
-  prop     => 0.6        weight on V (BN1); S (BN2) gets 1-prop  (must sum to 1)
+  prop     => 0.5        weight on V (BN1); S (BN2) gets 1-prop  (must sum to 1)
   v        => 'BN1'      label of the V (vertebral) reference electrode
   s        => 'BN2'      label of the S (sternal) reference electrode
   exclude  => qr/.../    channels passed through unchanged (not re-referenced);
@@ -115,7 +115,7 @@ Balanced non-cephalic (BNE) re-reference. Options:
 
 sub bne {
     my ($rec, %opt) = @_;
-    my $prop = defined $opt{prop} ? $opt{prop} : 0.6;
+    my $prop = defined $opt{prop} ? $opt{prop} : 0.5;
     my $vlab = defined $opt{v} ? $opt{v} : 'BN1';
     my $slab = defined $opt{s} ? $opt{s} : 'BN2';
     my $excl = defined $opt{exclude} ? $opt{exclude} : qr/^(?:DC\d+|Trigger)$/i;

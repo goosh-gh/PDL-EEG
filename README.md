@@ -162,3 +162,9 @@ conversion memory-bounded and several times faster than the naïve approach.
   recoverable from the files.
 - **Absolute DC µV is not calibrated.** Trigger *edges* (hence ERP epoching) are
   gain-independent, so this does not affect event extraction.
+- **`read_edf` assumes one sample rate.** All non-annotation signals must share a
+  single rate; the EDF+ annotation channel is parsed into `events` and excluded
+  from `data`. A mixed-rate EDF is read with a `carp` warning, using the first
+  signal's rate. EDF permits per-signal rates, but multi-rate reads are not
+  implemented. (This affects only third-party EDFs; files written by `write_edf`
+  are always single-rate.)
