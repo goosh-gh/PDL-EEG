@@ -6,7 +6,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 
 ## Requirements
 
-- Perl ≥ 5.36 and [PDL](https://pdl.perl.org/) (tested against PDL 2.085).
+- Perl ≥ 5.36 and [PDL](https://pdl.perl.org/) (tested against PDL 2.085+).
 - On macOS/MacPorts, build Cocoa-dependent extras with
   `./configure CC=clang OBJC=clang PKG_CONFIG=/opt/local/bin/pkg-config`.
 - The readers assume a **little-endian** host (Apple Silicon, x86-64, ARM64 all
@@ -16,7 +16,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 
 | Package | Role |
 |---------|------|
-| `PDL::EEG::IO::NihonKohden` | Reader for `.EEG` (EEG-1100C `wfmblock` + EEG-1200A `extblock`). Options: `all_blocks`, `block`, `label_map`. Returns `data [n_ch,n_samp]` µV, `fs`, `labels`, `t_start`, `events`, `gains`, `t_block_starts`, `gap_bounds`, `device`, `layout`, `system_reference`, `last_pattern`. |
+| `PDL::EEG::IO::NihonKohden` | Reader for `.EEG` (EEG-1100 `wfmblock` + EEG-1200 `extblock`, incl. multi-segment recordings). Options: `all_blocks`, `block`, `label_map`, `dc_base`. Returns `data [n_ch,n_samp]` **µV (all channels, DC included)**, `fs`, `labels`, `units` (per-channel export dimension `uV`/`mV`/`code`), `t_start`, `events`, `gains` (µV/bit), `n_samp_per_block`, `block_meta`, `t_block_starts`, `gap_bounds`, `device`, `layout`, `system_reference`, `last_pattern`. |
 | `PDL::EEG::IO::NihonKohden::PTN` | Parse Neurofax `.PTN` montage files (1100C + 1200A). |
 | `PDL::EEG::IO::NihonKohden::Montage` | `.LOG` montage name + `.PTN` + signal → `label_map`; `resolve_labels`. |
 | `PDL::EEG::IO::EDF` | `write_edf` (EDF / EDF+C) and `read_edf` (round-trips the `read_nk` contract); `clean_edf_label` normalises EDF+ signal labels. |
@@ -32,6 +32,8 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/nk_to_edf.pl` | NK `.EEG` → EDF/EDF+ (`--subject`, `--equipment`, `--allblocks`) |
 | `examples/nk_to_mul.pl` | NK `.EEG` → BESA `.mul` (`--cut`, `--cut-clock`, `--suffix`, `--bne`) |
 | `examples/edf_to_mul.pl` | EDF → BESA `.mul` (`--chans`, `--cut`, `--cut-clock`, `--suffix`, `--bne`) |
+| `examples/mul_to_nk.pl` | Diff a vendor `.mul` against `read_nk` (round-trip check); `--solve-bne` recovers the BN balance from the vendor's own export |
+| `examples/find_bn_balance.pl`, `examples/find_bn_diff.pl` | Search NK header files for where a known BN balance is stored (investigative; see caveats) |
 | `xt/verify_read.pl` | Real-data (or synthetic) `read_nk` sanity check, independent of `make test` |
 | `xt/smoke_bne.pl` | Author smoke test: `--bne` on a real `.EEG`/`.edf` |
 
@@ -47,8 +49,10 @@ my $rec = read_nk('JJ0090J6.EEG', all_blocks => 1);   # data[n_ch,n_samp] µV
 write_edf($rec, 'out.edf');                            # EDF+C, events → annotations
 write_mul($rec, 'out.mul');                            # BESA ASCII multiplexed
 
-# balanced non-cephalic re-reference, then export
-my $bn = bne($rec, prop => 0.5, suffix => '-BN');      # y = x − (p·BN1 + (1−p)·BN2)
+# balanced non-cephalic re-reference, then export.
+# prop is REQUIRED: the BN balance is a hardware setting, not stored in the file.
+# Measure it once with examples/mul_to_nk.pl --solve-bne, or read it off the amp.
+my $bn = bne($rec, prop => 0.71, suffix => '-BN');     # y = x − (p·BN1 + (1−p)·BN2)
 write_mul($bn, 'out_bne.mul');
 ```
 
@@ -81,16 +85,50 @@ passes DC/Trigger through unchanged, and tags re-referenced channels `-BN`.
 
 `--bne` on the CLIs is **off by default** (data written as recorded). When used,
 provenance is recorded in the `.mul` header as `SegmentName=BNE_prop<value>`
-(a standard BESA field). Default `prop = 0.5` — the BN balance is applied in
-analog hardware at electrode application, so 0.5 means "no extra digital
-re-balance"; other values apply one.
+(a standard BESA field).
+
+**`prop` is required — there is no safe default.** The BN balance is set on the
+amplifier (a front-panel value the operator dials in at recording time), and it
+is **not written to any file in the bundle** (see caveats). Two machines here
+measured **0.71** and **0.64** (logged as 0.65), confirming it is per-machine /
+per-session. An earlier version of this toolkit defaulted to `0.5`; that value
+was never correct for a real recording and only looked harmless because
+`BN1 ≈ BN2` in calibration segments. If you do not know the balance, recover it
+from a vendor `.mul` export (next section).
+
+#### Recovering the balance from a vendor `.mul` (`--solve-bne`)
+
+The Nihon Kohden viewer's own `.mul` export is already BN re-referenced. If you
+have one, `examples/mul_to_nk.pl` measures the balance the recorder actually
+used:
+
+```
+perl -Ilib examples/mul_to_nk.pl vendor.m01 --eeg subject.EEG --solve-bne
+```
+
+It aligns the `.mul` against `read_nk(all_blocks=>1)` (the `.mul` is a
+hand-selected range, so the offset is found by search, not assumed), then
+regresses `raw − mul` onto `BN1`/`BN2`. Because that residual is one common
+signal on every scalp channel — a reference difference — the fit is exact:
+weights that sum to 1 (confirming the model) with a residual at the ADC step.
+The recovered `prop` cross-checks against `|p−0.5|·rms(BN1−BN2)` to sub-percent.
+
+The tool is also a general **round-trip check**: matching the vendor export
+channel-for-channel is independent confirmation that block boundaries, channel
+order and gains are correct — including across recording breaks, which nothing
+in this toolkit could otherwise self-verify.
 
 ## Trigger / channel-label resolution (headbox-independent)
 
 Trigger/DC channel names are **not** derivable from the recording format alone:
 
-- The same trigger line is `DC03–06` on the 1100C headbox and `DC01–04` on the
-  1200A; a fixed-name search is a landmine.
+- The same trigger line is `DC03–06` on the EEG-1100 family and `DC01–04` on the
+  EEG-1200 family; a fixed-name search is a landmine. `read_nk` keys the default
+  DC numbering on the **format signature** at offset 0 (not the on-disk layout,
+  and not the enclosing directory name — `NKT/EEG2100/` is a folder, the
+  signature is `EEG-1200A V01.00`). Signatures outside the 1100/1200 families
+  have no assumed numbering: `read_nk` **croaks** rather than mislabel a trigger,
+  unless a `.21e` names the channels or you pass `dc_base => 1|3`.
 - The authoritative display names live in the **montage** (`.PTN`), which labels
   the four TTL lines `TrigBit0/2/4/8`; the electrode table calls them `DCxx`.
 - **Which recorded `ch_idx` carries a trigger is only visible in the signal** —
@@ -117,6 +155,38 @@ my $rec2 = read_nk($f, all_blocks=>1, label_map => $r->{label_map});
 dedicated CLI). Pass `names => [qw(DC03 DC04 DC05 DC06)]` to use physical box
 labels instead of the montage's `TrigBit*` names, or pin `label_map` by hand.
 
+## Multi-segment recordings & recording breaks
+
+EEG-1200 `extblock` recordings are **not one continuous stream**. At every
+recording break the recorder re-emits a 442-byte channel-info block
+(`72 + (n_ch−1)·10` bytes) into the sample stream, and the gaps between segments
+are real. `read_nk` detects these embedded headers, treats each span as its own
+block, and reports per-segment geometry:
+
+```perl
+my $rec = read_nk($f, all_blocks => 1);
+$rec->{n_samp_per_block};   # [205000, 176000, 30000, …]
+$rec->{block_meta};         # [{ index, start_samp, n_samp, t_start }, …]
+```
+
+The viewer marks each break with the **real elapsed time skipped**
+(`epoch(t_start[b+1]) − epoch(t_start[b]) − n_samp[b]/fs`), e.g. `▲ 46.0s
+skipped`, and loads only the segments a `--cut` range touches.
+
+`block_extents($file)` returns the same per-segment table without reading sample
+data, for quick inspection:
+
+```
+perl -Ilib -MPDL -MPDL::EEG::IO::NihonKohden=block_extents -e '
+  my $e = block_extents($ARGV[0]);
+  printf "%d segments: %s\n", scalar @$e,
+    join(", ", map { sprintf("%.1fs", $_->{n_samp}/$_->{fs}) } @$e);
+' subject.EEG
+```
+
+> Data written from a multi-segment 1200-family file by **any earlier version**
+> of this toolkit is wrong past the first break and must be regenerated.
+
 ## File-format reference
 
 `docs/nihon_kohden_files.md` documents every file in a Neurofax recording
@@ -126,12 +196,17 @@ where the system reference and per-segment display montage live.
 ## Tests
 
 ```
-make test        # 12 files (t/06 reserved/skipped), ~185 subtests
+make test        # 13 files (t/06 reserved/skipped), 270 subtests
 ```
 
-`t/01_nihonkohden` `t/02_edf` (write + read_edf round-trip) `t/03_ptn`
-`t/04_signal` `t/05_montage` `t/06_reserved` (skip: reserved) `t/07_blocks`
-`t/08_epoch` `t/09_i18n` `t/10_besa_ascii` `t/11_edf_to_mul` `t/12_derivation`.
+`t/01_nihonkohden` `t/02_edf` `t/03_ptn` `t/04_signal` `t/05_montage`
+`t/06_reserved` (skip: reserved) `t/07_blocks` (block_extents + multi-segment
+extblock regression) `t/08_epoch` `t/09_i18n` `t/10_besa_ascii` `t/11_edf_to_mul`
+`t/12_derivation` `t/13_edf_roundtrip` (µV round-trip incl. DC, per-signal EDF
+dimension).
+
+Test fixtures are generated by `perl t/mk_synthetic_nk.pl`; `--long[=SEC]` also
+writes larger scrollable files (`t/data/*_long.eeg`, git-ignored — not fixtures).
 
 `xt/smoke_bne.pl FILE.EEG|FILE.edf` is an author test that runs a converter with
 and without `--bne` on a real recording and checks structural invariants.
@@ -152,16 +227,29 @@ conversion memory-bounded and several times faster than the naïve approach.
 - **Name↔channel order is an assumption.** Montage trigger names are zipped onto
   detected triggers sorted by ascending `ch_idx`; verify once per headbox.
   `label_map` overrides.
-- **The BNE balance ratio is not stored in the recording.** It is applied in
-  analog hardware (a potentiometer at electrode application), so no file in the
-  bundle carries a digital ratio; `bne()` therefore takes `prop` as a parameter
-  (default 0.5). Verified exhaustively across `.21E/.LOG/.CN3/.11D/.bam/.EEG`
-  header and all 36 `.PTN` montages.
+- **The BN balance is not stored in any recording file.** It is a value the
+  operator sets on the amplifier, and the bundle records only the *choice* to
+  reference to BN (`.21E [REFERENCE] = $BN`), never the ratio. Searched
+  exhaustively — value scan, BCD, integer-percent, per-mil, and raw byte-diff of
+  two recordings with known-different balances — across `.EEG/.21E/.PNT/.LOG`
+  headers, with no field found. `bne()` therefore **requires** `prop`. The one
+  reliable way to recover it after the fact is `mul_to_nk.pl --solve-bne`
+  against a vendor `.mul`; failing that, read it off the amplifier or your notes.
+  (`examples/find_bn_balance.pl` / `find_bn_diff.pl` are the search tools, kept
+  for when a controlled two-recording diff — same machine, balance changed —
+  becomes available.)
 - **Per-segment display montage lives in `.CN3`**; the *recording* montage name
   is in `.LOG`/`.21E [LASTPATTERN]`. The *export-time* review montage is not
   recoverable from the files.
-- **Absolute DC µV is not calibrated.** Trigger *edges* (hence ERP epoching) are
-  gain-independent, so this does not affect event extraction.
+- **DC channels are calibrated in µV** (366.30 µV/bit, i.e. the ±12 V input
+  range; confirmed against the vendor `.mul`, whose DC columns are integer
+  multiples of 366.22 µV). `read_nk` returns **every** channel in µV, DC
+  included. Because a ±12 V DC line is ±12 002 913 µV and EDF's `physical_min`
+  field is only 8 characters, `write_edf` gives each signal its own physical
+  dimension — EEG in `uV`, DC in `mV` — and `read_edf` normalises back to µV.
+  BESA `.mul` has a single `Bins/uV`, so DC there is written in µV at full
+  magnitude; pass `exclude => [grep /^DC/]` if you only want the EEG scaled
+  sensibly.
 - **`read_edf` assumes one sample rate.** All non-annotation signals must share a
   single rate; the EDF+ annotation channel is parsed into `events` and excluded
   from `data`. A mixed-rate EDF is read with a `carp` warning, using the first

@@ -7,7 +7,7 @@ use Encode qw(decode);
 use POSIX ();
 use PDL;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 =head1 NAME
 
@@ -50,7 +50,7 @@ Format knowledge derived from EDFbrowser's nk2edf.cpp by Teunis van Beelen
 =cut
 
 use Exporter 'import';
-our @EXPORT_OK = qw(read_nk nk_layout nk_format_hint block_ranges select_block select_range clock_to_samp);
+our @EXPORT_OK = qw(read_nk nk_layout nk_format_hint block_extents block_ranges select_block select_range clock_to_samp);
 
 # ---------------------------------------------------------------------------
 # Sampling rate code → Hz
@@ -136,6 +136,9 @@ our %FORMAT_LAYOUT = (
     'EEG-2100 V01.00'  => 'wfmblock', 'EEG-2100 V02.00'  => 'wfmblock',
     'DAE-2100D V01.30' => 'wfmblock', 'DAE-2100D V02.00' => 'wfmblock',
     'EEG-1200A V01.00' => 'extblock',
+    'EEG-1200C V01.00' => 'extblock',   # seen in the wild (4 kHz, 18 segments);
+                                        # was already reading via the ext_address
+                                        # fallback, but make it explicit
 );
 
 # Physical recorder model -> likely format signature (NON-authoritative HINT).
@@ -150,10 +153,134 @@ our %DEVICE_FORMAT_HINT = (
     'EEG-2100' => 'EEG-2100 V01.00',
 );
 
-# extblock ADC gains (µV/bit), hardware-fixed, not stored in file.
-# EEG/micro channels use the ±3200 µV range; DC/other use the ±12002 range.
-my $EXT_GAIN_UV = (3199.902 + 3200.0)  / (32767 + 32768);   # ~0.09765624
-my $EXT_GAIN_MV = (12002.56 + 12002.9) / (32767 + 32768);   # ~0.36629984
+# extblock ADC gains, hardware-fixed, not stored in the file.
+#
+# The two ranges are quoted by the vendor in DIFFERENT units:
+#   EEG / "micro" channels : +/- 3200    uV
+#   DC / other channels    : +/- 12002.9 mV   -- i.e. +/- 12 V, not +/- 12 mV
+#
+# An EEG-1200A DC input is a +/-12 V line. A saturated DC channel reads exactly
+# -12002.9 on the vendor's scale, which is the rail; a 3.3-5 V trigger pulse sits
+# around 3.6-4.2 on it. Earlier versions of this reader used the mV figure as
+# though it were uV/bit, so every DC channel came out 1000x too small and a 4 V
+# TTL looked like a 4 mV wobble.
+#
+# {data} and {gains} are now uniformly MICROVOLTS, for every channel. The DC gain
+# is the vendor's mV/bit x 1000.
+#
+# {units} is a separate thing: it is the dimension each channel should be WRITTEN
+# in when exported. A DC channel cannot go into EDF in uV -- +/-12002900 uV needs
+# nine characters and EDF's physical_min field is eight -- so it is exported in
+# mV. write_edf() reads {units} and does that conversion; nothing else should.
+my $EXT_GAIN_UV = (3199.902 + 3200.0)  / (32767 + 32768);          # ~0.0977 uV/bit
+my $EXT_GAIN_MV = (12002.56 + 12002.9) / (32767 + 32768) * 1000;   # ~366.3  uV/bit
+# ---------------------------------------------------------------------------
+# DC TRIGGER CHANNEL NUMBERING
+#
+# The four trigger DC inputs are hardware electrode codes 45-48. What they are
+# CALLED on the front panel is not the same on every recorder:
+#
+#   EEG-1100A/B/C : DC03 DC04 DC05 DC06     (what @DEFAULT_LABELS says)
+#   EEG-1200A     : DC01 DC02 DC03 DC04
+#
+# and the physical recorder model is NOT IN THE FILE -- see %FORMAT_LAYOUT above:
+# the 16-byte string at 0x0000 is a FORMAT signature, and the same recorder can
+# emit different signatures after a firmware update. So the best we have is the
+# format signature, and the mapping below is keyed on that.
+#
+# Signatures whose DC numbering has NOT been confirmed against a real recording
+# are deliberately ABSENT. We do not guess: a wrong DC label silently attaches
+# the stimulus triggers to the wrong channel, and that error survives all the way
+# into an analysis. read_nk() croaks and asks for the .21e, or for an explicit
+# dc_base.
+#
+# A .21e names the channels outright and always wins. When one is present AND it
+# names the DC codes, we cross-check it against this table and carp on
+# disagreement -- which is how an unconfirmed signature gets confirmed, or the
+# table gets corrected, the first time a real file of that kind is read.
+#
+# The rule is by FAMILY, and each half of it has a source:
+#
+#   EEG-1100*  -> 3   This is just @DEFAULT_LABELS, the vendor electrode-code
+#                     table out of nk2edf.cpp, which names code 45 "DC03". Not a
+#                     guess -- the documented table. Confirmed in practice on
+#                     EEG-1100C.
+#
+#   EEG-1200*  -> 1   The 1200 line DEVIATES from that table and starts at DC01.
+#                     Confirmed on real recordings from two different signatures,
+#                     EEG-1200A and EEG-1200C, whose own .21e files name codes
+#                     45-48 DC01..DC04.
+#
+# Anything else -- EEG-2100, QI-403A, DAE-2100D, or a signature that does not
+# exist yet -- follows NEITHER convention as far as we know, so read_nk() croaks
+# rather than pick one. A wrong DC label silently attaches the stimulus triggers
+# to the wrong channel, and that error survives all the way into an analysis.
+#
+# Beware "EEG2100": it is ALSO the directory the vendor software exports into
+# (NKT/EEG2100/...), and a file in that folder is routinely signed
+# "EEG-1200A V01.00" -- the recording this was all debugged on is exactly that.
+# The directory names the product line; the 16 bytes at 0x0000 name the FORMAT.
+# They are different things and they disagree.
+my @DC_FAMILY = (
+    [ qr/^EEG-1200/ => 1 ],
+    [ qr/^EEG-1100/ => 3 ],
+);
+my @DC_CODES = (45, 46, 47, 48);
+
+sub _dc_labels {
+    my ($sig, $dc_base) = @_;
+    my ($fmt) = ($sig // '') =~ /^(\S+)/;               # "EEG-1200C V01.00" -> "EEG-1200C"
+    my $base = $dc_base;
+    if (!defined $base && defined $fmt) {
+        for my $f (@DC_FAMILY) {
+            if ($fmt =~ $f->[0]) { $base = $f->[1]; last }
+        }
+    }
+    return undef unless defined $base;
+    return { map { $DC_CODES[$_] => sprintf('DC%02d', $base + $_) } 0 .. $#DC_CODES };
+}
+
+# Refuse to guess when it matters: this file HAS trigger DC channels, we have no
+# numbering for its signature, and nothing else names them.
+sub _check_dc_known {
+    my ($sig, $dc, $hw, $ov) = @_;
+    return if $dc;
+    my %code = map { $_ => 1 } @DC_CODES;
+    my @unnamed = grep { $code{$_} && !defined $ov->{ $_ - 1 } } @$hw;
+    return unless @unnamed;
+    croak
+        "DC channel numbering is unknown for format signature '" . ($sig // '?') . "'.\n"
+      . "  Hardware codes 45-48 are the four trigger DC inputs, but their panel\n"
+      . "  names differ by family:  EEG-1100* -> DC03..DC06\n"
+      . "                           EEG-1200* -> DC01..DC04\n"
+      . "  and this signature is in neither family.\n"
+      . "  and this file has no .21e naming them. Refusing to guess: a wrong DC\n"
+      . "  label puts the stimulus triggers on the wrong channel.\n"
+      . "  Either put the .21e next to the .EEG, or say which panel it is:\n"
+      . "      read_nk(\$file, dc_base => 1)   # DC01..DC04  (EEG-1200A)\n"
+      . "      read_nk(\$file, dc_base => 3)   # DC03..DC06  (EEG-1100x)\n";
+}
+
+# When the .21e DOES name the DC codes, check our table against it. This is the
+# only way %DC_BASE ever gets validated, so it is worth the four comparisons.
+sub _verify_dc_base {
+    my ($sig, $dc, $hw, $ov) = @_;
+    return unless $dc;
+    my %code = map { $_ => 1 } @DC_CODES;
+    my @bad;
+    for my $c (grep { $code{$_} } @$hw) {
+        my $named = $ov->{ $c - 1 } or next;             # .21e did not name it
+        next unless $named =~ /^DC\d+$/i;                # a custom name proves nothing
+        push @bad, "code $c: .21e says $named, table says $dc->{$c}"
+            if uc($named) ne uc($dc->{$c});
+    }
+    carp "DC numbering for '" . ($sig // '?') . "' disagrees with the .21e:\n"
+       . join('', map { "    $_\n" } @bad)
+       . "  The .21e wins (it is the recording's own montage), but %DC_BASE in "
+       . __PACKAGE__ . " is wrong for this signature -- please fix it."
+        if @bad;
+}
+
 # 1-based hardware channel index -> "micro" (µV) vs DC/other range
 sub _ext_is_micro {
     my $c = shift;
@@ -237,11 +364,24 @@ Options:
   block       => $n   # which waveform block to read (0-based, default 0)
   all_blocks  => 1    # concatenate ALL waveform blocks into one recording
                       #   (wfmblock only; extblock is already a single block).
-                      #   Recording breaks between blocks are filled with a
-                      #   short zero marker (gap_samples) and reported in
-                      #   gap_bounds so analysis can reject epochs that cross a
-                      #   gap. The gap is NOT padded to real elapsed time.
-  gap_samples => $n   # width of the inter-block gap marker (default 100)
+                      #   Blocks are butt-joined: NO synthetic samples are
+                      #   inserted at a recording break. Break positions are in
+                      #   t_block_starts / block_meta, which also carry each
+                      #   block's wall-clock t_start, so the real elapsed gap is
+                      #   recoverable. The data are NOT padded to elapsed time.
+  dc_base     => 1|3  # what hardware code 45 is CALLED on the front panel:
+                      #   1 -> DC01..DC04  (EEG-1200A)
+                      #   3 -> DC03..DC06  (EEG-1100A/B/C)
+                      # Only needed when the file's format signature is not in
+                      # %DC_BASE and there is no .21e naming the DC channels; in
+                      # that case read_nk croaks rather than guess, because a
+                      # wrong DC label puts the triggers on the wrong channel.
+                      # A .21e always wins over this.
+  gap_samples => $n   # DEPRECATED. Insert $n zero samples at each recording
+                      #   break (and report them in gap_bounds). Default 0.
+                      #   Zeros are not data: they ring through filters, corrupt
+                      #   spectra and distort waveform metrics. Only set this if
+                      #   you have code that still keys off gap_bounds.
   no_events   => 1    # skip event parsing even if .log exists
   label_map   => \%h  # override channel labels, keyed by 1-based ch_idx
                       #   (electrode index in the file). Highest priority, above
@@ -275,7 +415,7 @@ sub read_nk {
     my $want_events = !$opts{no_events};
     my $fs_override = $opts{fs};          # caller can supply fs (e.g. 1000)
     my $all_blocks  = $opts{all_blocks} ? 1 : 0;
-    my $gap_samples = $opts{gap_samples} // 100;
+    my $gap_samples = $opts{gap_samples} // 0;
 
     # --- Layout dispatch (signature-based, with fallback) ------------------
     my (undef, $layout, $how) = nk_layout($eeg_path);
@@ -343,7 +483,7 @@ sub read_nk {
             push @block_meta,
                 { start_samp => $pos, n_samp => $ns, t_start => $blk[$b]{meta}{t_start} };
             $pos += $ns;
-            if ($b < $#blk) {                          # gap marker after each block
+            if ($b < $#blk && $gap_samples > 0) {      # optional gap marker
                 push @gap_bounds, [ $pos, $pos + $gap_samples - 1 ];
                 $pos += $gap_samples;
             }
@@ -367,6 +507,11 @@ sub read_nk {
     }
 
     # Valid channels = ch_indices[0..n_ch_valid-1]; last ch is zero-pad
+    my @hw_idx = @{ $meta->{ch_indices} }[ 0 .. $n_ch_valid - 1 ];
+    my $dc = _dc_labels($device, $opts{dc_base});
+    _check_dc_known($device, $dc, \@hw_idx, \%label_override);
+    _verify_dc_base($device, $dc, \@hw_idx, \%label_override);
+
     my @labels;
     for my $i (0 .. $n_ch_valid - 1) {
         my $idx       = $meta->{ch_indices}[$i];  # 1-indexed
@@ -374,6 +519,7 @@ sub read_nk {
         my $user      = $opts{label_map} ? $opts{label_map}{$idx} : undef;  # ch_idx key
         push @labels, $user
                    // $label_override{$label_idx}
+                   // ($dc ? $dc->{$idx} : undef)   # this signature's DC panel
                    // ($label_idx >= 0 ? $DEFAULT_LABELS[$label_idx] : undef)
                    // "CH$i";
     }
@@ -414,6 +560,8 @@ sub read_nk {
         gap_bounds     => \@gap_bounds,       # [[start_samp,end_samp],...] concat coords
         t_block_starts => \@t_block_starts,   # concat start sample of each block
         block_meta     => \@block_meta,       # per-block {start_samp,n_samp,t_start}
+        n_samp_per_block => [ map { $_->{n_samp} } @block_meta ],
+        units          => [ ('uV') x $n_ch ],            # wfmblock is uV throughout
     };
 }
 
@@ -477,6 +625,8 @@ sub _read_extblock {
     my ($eeg_path, %opts) = @_;
     my $fs_override = $opts{fs};
     my $want_events = !$opts{no_events};
+    my $block_idx   = $opts{block};
+    my $all_blocks  = $opts{all_blocks} ? 1 : 0;
 
     open my $fh, '<:raw', $eeg_path or croak "Cannot open $eeg_path: $!";
     (my $device = _read_bytes($fh, 0x0000, 16)) =~ s/\x00.*//s;
@@ -489,34 +639,98 @@ sub _read_extblock {
     my $fs = $fs_override // (_read_u16le($fh, $data_addr + 0x1A) & 0x3FFF)
         or croak "extblock: sampling rate not determined (supply fs => NNN)";
 
-    my $eb2 = _read_u32le($fh, $ext + 18);
-    my $eb3 = _read_u32le($fh, $eb2 + 20);
+    my $eb2  = _read_u32le($fh, $ext + 18);
+    my $eb3  = _read_u32le($fh, $eb2 + 20);
     my $n_ch = _read_u16le($fh, $eb3 + 68) + 1;            # +1 STIM
     my @hw;
     push @hw, _read_u16le($fh, $eb3 + 72 + $_ * 10) + 1 for 0 .. $n_ch - 2;
-    my $rec = $eb3 + 72 + ($n_ch - 1) * 10;
+
+    my $hdr_len = 72 + ($n_ch - 1) * 10;   # size of the channel-info block (e.g. 442)
+    my $stride  = $n_ch * 2;               # bytes per sample (e.g. 76)
+    my $rec     = $eb3 + $hdr_len;         # first sample of the FIRST segment
 
     seek $fh, 0, 2; my $file_size = tell $fh;
-    my $n_samp = int(($file_size - $rec) / $n_ch / 2);
-    croak "extblock: no samples (rec=$rec, size=$file_size)" if $n_samp <= 0;
+    croak "extblock: no samples (rec=$rec, size=$file_size)" if $file_size <= $rec;
 
-    my $t_start = sprintf("20%02d-%02d-%02d %02d:%02d:%02d",
-        map { _bcd_byte($fh, $data_addr + 0x14 + $_) } 0 .. 5);
+    # -----------------------------------------------------------------------
+    # SEGMENTS.
+    #
+    # An extblock file is NOT one contiguous data block. At every recording
+    # break the recorder writes a fresh copy of the channel-info block --
+    # 72 + (n_ch-1)*10 bytes, byte-identical to the one at eb3 except for its
+    # timestamp -- straight into the sample stream, and then carries on.
+    #
+    # Earlier versions of this reader assumed a single block running to EOF, so
+    # they read each embedded header as if it were 5.8 samples of EEG. The
+    # channel phase then slipped by hdr_len % stride bytes (442 % 76 = 62 bytes
+    # = 31 channels) at every break, and from the first break onward every
+    # channel label sat on another channel's data. It also over-reported the
+    # sample count by hdr_len/stride per break.
+    #
+    # The header is unmistakable and is always sample-aligned:
+    #     +0x00        0x01                       block type
+    #     +0x01..+0x04 "TIME"
+    #     +0x12,+0x13  0x02 0x02                  version
+    #     +0x14..      "YYYYMMDDHHMMSS" (ASCII)   this segment's start time
+    #     +0x44        u16 = n_ch - 1             channel count, must agree
+    #     +0x48..      the channel table again
+    # -----------------------------------------------------------------------
+    my @seg = _ext_segments($fh, $file_size, $rec, $hdr_len, $stride, $n_ch,
+                           _ext_hdr_time($fh, $eb3) // _bcd_time($fh, $data_addr));
+    croak "extblock: no data segments found" unless @seg;
 
-    seek $fh, $rec, 0;
-    my $buf; my $want = $n_ch * $n_samp * 2;
-    my $got = read($fh, $buf, $want);
-    $n_samp = int($got / $n_ch / 2) if $got < $want;
+    my $n_blocks = scalar @seg;
+    croak "extblock: block index $block_idx out of range (have $n_blocks)"
+        if defined $block_idx && ($block_idx < 0 || $block_idx >= $n_blocks);
+
+    # which segments to read
+    my @want = (defined $block_idx) ? ($seg[$block_idx])
+             : ($n_blocks == 1 || $all_blocks) ? @seg
+             : ($seg[0]);                          # default: first segment only
+
+    # -----------------------------------------------------------------------
+    # Read the wanted segments and concatenate (butt-joined; gap_samples is
+    # honoured for callers that still want the old zero marker).
+    # -----------------------------------------------------------------------
+    my $gap_samples = $opts{gap_samples} // 0;
+    my $n_samp = 0; $n_samp += $_->{n_samp} for @want;
+    $n_samp   += $gap_samples * $#want if @want > 1;
+    croak "extblock: no samples" if $n_samp <= 0;
+
     my $u16 = zeroes(ushort, $n_ch, $n_samp);
-    ${ $u16->get_dataref } = substr($buf, 0, $n_ch * $n_samp * 2);
+    my $dst = $u16->get_dataref;
+    my $pos = 0;
+    my (@t_block_starts, @block_meta, @gap_bounds, @n_per);
+    for my $i (0 .. $#want) {
+        my $s = $want[$i];
+        seek $fh, $s->{off}, 0;
+        my $buf;
+        my $want_b = $s->{n_samp} * $stride;
+        my $got = read($fh, $buf, $want_b);
+        croak "extblock: short read in segment $i" unless $got == $want_b;
+        substr($$dst, $pos * $stride, $want_b) = $buf;
+        push @t_block_starts, $pos;
+        push @n_per, $s->{n_samp};
+        push @block_meta, { start_samp => $pos, n_samp => $s->{n_samp},
+                            t_start => $s->{t_start} };
+        $pos += $s->{n_samp};
+        if ($i < $#want && $gap_samples > 0) {
+            push @gap_bounds, [ $pos, $pos + $gap_samples - 1 ];
+            $pos += $gap_samples;
+        }
+    }
     $u16->upd_data;
 
-    my (@gain_uv, @offset);
+    my $t_start = $want[0]{t_start};
+
+    my (@gain_uv, @offset, @units);
     for my $c (@hw) {
-        push @gain_uv, _ext_is_micro($c) ? $EXT_GAIN_UV : $EXT_GAIN_MV;
+        my $micro = _ext_is_micro($c);
+        push @gain_uv, $micro ? $EXT_GAIN_UV : $EXT_GAIN_MV;   # both uV/bit
+        push @units,   $micro ? 'uV' : 'mV';                   # EXPORT dimension
         push @offset,  32768;
     }
-    push @gain_uv, 1.0; push @offset, 0;                   # STIM: raw code
+    push @gain_uv, 1.0; push @offset, 0; push @units, 'code';   # STIM: raw code
     my $gains = PDL->new(\@gain_uv);
     my $offs  = PDL->new(\@offset);
 
@@ -528,11 +742,21 @@ sub _read_extblock {
         my %h = _read_21e("$base$ext21");
         if (%h) { %ov = %h; last }
     }
+    # DC numbering keys on the FORMAT SIGNATURE, not on the layout. extblock does
+    # not imply EEG-1200A, and the recorder model is not in the file at all.
+    my $dc = _dc_labels($device, $opts{dc_base});
+    _check_dc_known($device, $dc, \@hw, \%ov);
+    _verify_dc_base($device, $dc, \@hw, \%ov);
+
     my @labels;
     for my $c (@hw) {
         my $li = $c - 1;
         my $user = $opts{label_map} ? $opts{label_map}{$c} : undef;   # ch_idx (hw index) key
-        push @labels, $user // $ov{$li} // ($li >= 0 ? $DEFAULT_LABELS[$li] : undef) // "CH$li";
+        push @labels, $user
+                   // $ov{$li}                                  # .21e override
+                   // ($dc ? $dc->{$c} : undef)                 # model's DC panel
+                   // ($li >= 0 ? $DEFAULT_LABELS[$li] : undef)
+                   // "CH$li";
     }
     push @labels, 'STIM';
 
@@ -541,9 +765,11 @@ sub _read_extblock {
         my $lp = "$base.LOG"; $lp = "$base.log" unless -f $lp;
         @events = _read_log($lp) if -f $lp;
     }
-    # extblock data is gap-removed continuous, so wall-clock event t does not map
-    # to samples; place events by epoch instead (see _attach_epoch_samp).
-    _attach_epoch_samp(\@events, $n_samp, $fs);
+    # Segment boundaries and their wall-clock starts are now known exactly, from
+    # the embedded block headers -- so events can be placed against real anchors
+    # instead of _attach_epoch_samp()'s uniform-epoch approximation.
+    _attach_seg_samp(\@events, \@block_meta, $fs)
+        or _attach_epoch_samp(\@events, $n_samp, $fs);
 
     close $fh;
 
@@ -553,11 +779,14 @@ sub _read_extblock {
         labels           => \@labels,
         t_start          => $t_start,
         events           => \@events,
-        gains            => $gains,            # [n_ch] µV/bit (STIM=1)
-        n_blocks         => 1,
+        gains            => $gains,            # [n_ch] uV/bit, ALL channels
+        units            => \@units,           # [n_ch] EXPORT dimension:
+                                               #   'uV' | 'mV' (DC) | 'code' (STIM).
+                                               #   {data} is uV regardless.
+        n_blocks         => $n_blocks,
         n_ch_valid       => $n_ch - 1,         # analog channels (excl. STIM)
-        block_idx        => 0,
-        all_blocks       => ($opts{all_blocks} ? 1 : 0),
+        block_idx        => (defined $block_idx ? $block_idx : ($all_blocks ? -1 : 0)),
+        all_blocks       => $all_blocks,
         device           => $device,
         layout           => 'extblock',
         system_reference => $ov{system_reference},   # e.g. "C3,C4" (.21e [SYSTEM_SETUP])
@@ -565,11 +794,131 @@ sub _read_extblock {
         ch_hw_idx        => \@hw,              # 1-based hardware indices
         ch_indices       => \@hw,             # alias: 1-based ch_idx per label (matches wfmblock)
         stim_index       => $n_ch,            # 1-based; last row
-        gap_bounds       => [],               # single data block: no gaps
-        t_block_starts   => [0],
-        block_meta       => [ { start_samp => 0, n_samp => $n_samp, t_start => $t_start } ],
-        n_samp_per_block => [$n_samp],
+        gap_bounds       => \@gap_bounds,
+        t_block_starts   => \@t_block_starts,
+        block_meta       => \@block_meta,
+        n_samp_per_block => \@n_per,
+        hdr_len          => $hdr_len,         # embedded channel-info block size
     };
+}
+
+# ---------------------------------------------------------------------------
+# _ext_segments($fh, $file_size, $rec, $hdr_len, $stride, $n_ch, $t0)
+#
+# Walk an extblock's data region and return its segments.
+#
+#   [ { off, n_samp, t_start }, ... ]
+#
+# The sample grid RESTARTS after every embedded header, because the header is
+# hdr_len bytes and hdr_len % stride != 0 (442 % 76 = 62). So a header can only
+# be tested for alignment against the START OF THE CURRENT SEGMENT -- testing it
+# against the first sample of the file (as a first cut of this code did) rejects
+# every header after the first, which is exactly the kind of off-by-one that
+# produced the original bug.
+# ---------------------------------------------------------------------------
+sub _ext_segments {
+    my ($fh, $file_size, $rec, $hdr_len, $stride, $n_ch, $t0) = @_;
+
+    # candidate offsets: every "\x01TIME" in the data region
+    my @cand;
+    my $CHUNK = 1 << 22;
+    for (my $b = $rec; $b < $file_size; $b += $CHUNK - $hdr_len) {
+        my $len = $CHUNK;
+        $len = $file_size - $b if $b + $len > $file_size;
+        last if $len <= 0;
+        seek $fh, $b, 0;
+        my $buf;
+        read($fh, $buf, $len) or last;
+        my $p = -1;
+        # CORE::index -- PDL::Slices exports an index() that shadows the builtin
+        # ("Usage: PDL::index(a, ind)"). Same trap as t/09_i18n.t.
+        while (($p = CORE::index($buf, "\x01TIME", $p + 1)) >= 0) {
+            my $off = $b + $p;
+            next if $off + $hdr_len > $file_size;
+            push @cand, $off unless @cand && $cand[-1] == $off;
+        }
+    }
+
+    my (@seg, @hdr);
+    my $seg_off = $rec;
+    my $seg_t   = $t0;
+    for my $off (@cand) {
+        next if $off < $seg_off;                          # inside a header we took
+        next if ($off - $seg_off) % $stride;              # not on THIS segment's grid
+        next unless _ext_is_hdr($fh, $off, $n_ch);
+        my $n = int(($off - $seg_off) / $stride);
+        push @seg, { off => $seg_off, n_samp => $n, t_start => $seg_t } if $n > 0;
+        $seg_t   = _ext_hdr_time($fh, $off) // $seg_t;
+        $seg_off = $off + $hdr_len;
+    }
+    my $n = int(($file_size - $seg_off) / $stride);
+    push @seg, { off => $seg_off, n_samp => $n, t_start => $seg_t } if $n > 0;
+    return @seg;
+}
+
+# Is there an embedded channel-info block at $off? The signature is strong:
+# 0x01, "TIME", version 0x02 0x02, and a channel count that agrees with eb3.
+sub _ext_is_hdr {
+    my ($fh, $off, $n_ch) = @_;
+    my $b = _read_bytes($fh, $off, 0x46);
+    return 0 unless length($b) >= 0x46;
+    return 0 unless substr($b, 0, 5) eq "\x01TIME";
+    return 0 unless substr($b, 0x12, 2) eq "\x02\x02";
+    return 0 unless substr($b, 0x14, 14) =~ /^\d{14}$/;      # YYYYMMDDHHMMSS
+    return 0 unless unpack('v', substr($b, 0x44, 2)) == $n_ch - 1;
+    return 1;
+}
+
+# The block header carries its segment's start time as ASCII YYYYMMDDHHMMSS at
+# +0x14 -- no BCD, no epoch guessing.
+sub _ext_hdr_time {
+    my ($fh, $off) = @_;
+    my $b = _read_bytes($fh, $off + 0x14, 14);
+    return undef unless defined $b && $b =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
+    return "$1-$2-$3 $4:$5:$6";
+}
+
+sub _bcd_time {
+    my ($fh, $addr) = @_;
+    return sprintf("20%02d-%02d-%02d %02d:%02d:%02d",
+        map { _bcd_byte($fh, $addr + 0x14 + $_) } 0 .. 5);
+}
+
+# Place .LOG events using the real segment anchors: within a segment wall-clock
+# and data advance 1:1, so a wall-clock time t inside segment b maps to
+#     samp = start_samp[b] + (t - t_start[b]) * fs
+# This replaces _attach_epoch_samp()'s assumption that every segment is the same
+# length -- an assumption that put events seconds away from where they belong.
+sub _attach_seg_samp {
+    my ($events, $meta, $fs) = @_;
+    return 0 unless $events && @$events && $meta && @$meta && $fs;
+    my @ep = map { _epoch_of($_->{t_start}) } @$meta;
+    return 0 if grep { !defined } @ep;
+    for my $e (@$events) {
+        my $wall = $e->{epoch_sec};
+        if (!defined $wall) {
+            # .LOG t is seconds from the recording start
+            next unless defined $e->{t};
+            $wall = $ep[0] + $e->{t};
+        }
+        my $b = 0;
+        for my $i (0 .. $#ep) { $b = $i if $wall >= $ep[$i] }
+        my $s = $meta->[$b]{start_samp} + int(($wall - $ep[$b]) * $fs + 0.5);
+        $s = $meta->[$b]{start_samp} if $s < $meta->[$b]{start_samp};
+        my $end = $meta->[$b]{start_samp} + $meta->[$b]{n_samp} - 1;
+        $s = $end if $s > $end;
+        $e->{samp}   = $s;
+        $e->{t_data} = $s / $fs;
+    }
+    return 1;
+}
+
+sub _epoch_of {
+    my $ts = shift // '';
+    my ($Y,$M,$D,$h,$m,$s) = $ts =~ /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/
+        or return undef;
+    my $e = POSIX::mktime($s, $m, $h, $D, $M - 1, $Y - 1900, 0, 0, -1);
+    return (defined $e && $e >= 0) ? $e : undef;
 }
 
 # ---------------------------------------------------------------------------
@@ -825,6 +1174,32 @@ sub _hexdump {
 # Block / segment selection helpers
 # ---------------------------------------------------------------------------
 
+=head2 block_extents($eeg_file, %opt)
+
+Return the per-block extents of a file B<without reading any sample data>: only
+the control-block address table and each waveform block's header are read.
+C<n_samp> is derived from the address gap, exactly as the reader does.
+
+  [ { index => 0, addr => 0x..., n_samp => 34000,
+      start_samp => 0,     end_samp => 34000,
+      t_start => "...", fs => 1000, n_ch => 34, n_ch_valid => 33 },
+    { index => 1, ..., start_samp => 34100, end_samp => 407100, ... }, ... ]
+
+C<start_samp>/C<end_samp> are in the same coordinate system that
+C<read_nk($f, all_blocks =E<gt> 1)> produces. Both default to C<gap_samples =E<gt> 0>
+(blocks butt-joined); if you pass a non-zero C<gap_samples> to one, pass the same
+to the other or the coordinates will not line up.
+
+C<t_start> is each block's own wall-clock start, so the elapsed gap at a break is
+C<epoch(t_start[b+1]) - epoch(t_start[b]) - n_samp[b]/fs> -- the information the
+old zero-padding was standing in for, without putting fake samples in the data.
+
+Use this to plan a partial read -- "which blocks does 100-500 s touch?" -- and
+then C<read_nk($f, block =E<gt> $i)> only those. C<block_ranges> cannot do this:
+it operates on a record that has already been read.
+
+extblock (EEG-1200A) files hold a single data block, so one entry is returned.
+
 =head2 block_ranges($rec, %opt)
 
 Return the block/segment boundaries of a record as an arrayref of hashrefs
@@ -857,6 +1232,112 @@ sub _add_seconds {
     return $tstr if !defined $ep || $ep < 0;
     my @lt = localtime($ep + $sec);
     return POSIX::strftime("%Y-%m-%d %H:%M:%S", @lt);
+}
+
+# ---------------------------------------------------------------------------
+# block_extents($eeg_path, %opt) -> arrayref of per-block extents, HEADER ONLY.
+#
+# Reads the control-block address table and each waveform block's header, but NO
+# sample data. n_samp is derived from the address gap exactly as _read_wfm_block
+# does, so start_samp/end_samp are in the SAME coordinate system that
+# read_nk(all_blocks => 1) produces. Both default to gap_samples => 0 (blocks
+# butt-joined); a non-zero value must be passed to BOTH or they will not line up.
+#
+# This lets a caller plan a partial read ("which blocks does 100-500 s touch?")
+# without loading the whole recording. block_ranges() cannot do this: it needs a
+# record that has already been read.
+#
+#   [ { index, addr, n_samp, start_samp, end_samp, t_start, fs, n_ch, n_ch_valid }, ... ]
+#
+# extblock (EEG-1200A) files hold a single data block, so this returns one entry.
+# ---------------------------------------------------------------------------
+sub block_extents {
+    my ($eeg_path, %opt) = @_;
+    croak "File not found: $eeg_path" unless -f $eeg_path;
+    my $gap_samples = $opt{gap_samples} // 0;
+
+    my (undef, $layout) = nk_layout($eeg_path);
+    croak "Unknown Nihon Kohden signature in $eeg_path" unless defined $layout;
+
+    open my $fh, '<:raw', $eeg_path or croak "Cannot open $eeg_path: $!";
+    seek $fh, 0, 2;
+    my $file_size = tell $fh;
+
+    if ($layout eq 'extblock') {
+        # extblock is NOT a single data block: the recorder re-emits the
+        # channel-info block (72 + (n_ch-1)*10 bytes) into the sample stream at
+        # every recording break. Walk them the same way _read_extblock does.
+        my $ext  = _read_u32le($fh, 0x03EE)
+            or croak "extblock: ext_address is 0 in $eeg_path";
+        my $ctl0      = _read_u32le($fh, 0x0092);
+        my $data_addr = _read_u32le($fh, $ctl0 + 18);
+        my $fs        = $opt{fs} // (_read_u16le($fh, $data_addr + 0x1A) & 0x3FFF);
+        my $eb2  = _read_u32le($fh, $ext + 18);
+        my $eb3  = _read_u32le($fh, $eb2 + 20);
+        my $n_ch = _read_u16le($fh, $eb3 + 68) + 1;
+        my $hdr_len = 72 + ($n_ch - 1) * 10;
+        my $stride  = $n_ch * 2;
+        my $rec     = $eb3 + $hdr_len;
+
+        my @seg = _ext_segments($fh, $file_size, $rec, $hdr_len, $stride, $n_ch,
+                               _ext_hdr_time($fh, $eb3) // _bcd_time($fh, $data_addr));
+        my @out;
+        my $pos = 0;
+        for my $i (0 .. $#seg) {
+            push @out, { index      => $i,
+                         addr       => $seg[$i]{off},
+                         n_samp     => $seg[$i]{n_samp},
+                         start_samp => $pos,
+                         end_samp   => $pos + $seg[$i]{n_samp},
+                         t_start    => $seg[$i]{t_start},
+                         fs         => $fs,
+                         n_ch       => $n_ch,
+                         n_ch_valid => $n_ch - 1 };
+            $pos += $seg[$i]{n_samp};
+            $pos += $gap_samples if $i < $#seg;
+        }
+        close $fh;
+        return \@out;
+    }
+
+    # --- wfmblock: control block list -> waveform block addresses -------------
+    my $ctl_count = _read_u8($fh, 0x0091);
+    croak "No control blocks in file" unless $ctl_count > 0;
+    my @wfm_addrs;
+    for my $i (0 .. $ctl_count - 1) {
+        my $ctl_addr = _read_u32le($fh, 0x0092 + $i * 20);
+        my $db_count = _read_u8($fh, $ctl_addr + 17);
+        for my $j (0 .. $db_count - 1) {
+            push @wfm_addrs, _read_u32le($fh, $ctl_addr + 18 + $j * 20);
+        }
+    }
+    croak "No waveform blocks in $eeg_path" unless @wfm_addrs;
+
+    my @out;
+    my $pos = 0;
+    for my $b (0 .. $#wfm_addrs) {
+        my $waddr = $wfm_addrs[$b];
+        my $next  = ($b + 1 <= $#wfm_addrs) ? $wfm_addrs[$b + 1] : $file_size;
+        my $h     = _read_wfm_header($fh, $waddr);            # header only
+        my $data_bytes = ($next - $waddr) - ($h->{data_offset} - $waddr);
+        croak "block_extents: block $b data_bytes=$data_bytes not divisible by "
+            . "n_ch*2=" . ($h->{n_ch} * 2)
+            if $data_bytes % ($h->{n_ch} * 2) != 0;
+        my $n_samp = int($data_bytes / ($h->{n_ch} * 2));
+        push @out, { index      => $b,
+                     addr       => $waddr,
+                     n_samp     => $n_samp,
+                     start_samp => $pos,                       # all_blocks coords
+                     end_samp   => $pos + $n_samp,
+                     t_start    => $h->{t_start},
+                     fs         => $h->{fs},
+                     n_ch       => $h->{n_ch},
+                     n_ch_valid => $h->{n_ch_valid} };
+        $pos += $n_samp;
+        $pos += $gap_samples if $b < $#wfm_addrs;              # matches read_nk
+    }
+    close $fh;
+    return \@out;
 }
 
 sub block_ranges {
@@ -1011,13 +1492,25 @@ without code changes; truly non-NK signatures are rejected.
 
 =item *
 
-C<all_blocks =E<gt> 1> concatenates all wfmblock waveform blocks, inserting a
-short zero marker (C<gap_samples>, default 100) at each recording break rather
-than padding to real elapsed time. Break positions are reported in
-C<gap_bounds> (concatenated-sample coordinates) so that later epoching can
-reject segments that would cross a gap. Channel layout is assumed constant
-across blocks; a mismatch is a fatal error. extblock files are a single data
-block, so C<all_blocks> is a no-op there.
+C<all_blocks =E<gt> 1> concatenates all wfmblock waveform blocks. Blocks are
+butt-joined and the data are NOT padded to real elapsed time: a recording break
+is a discontinuity, not a stretch of samples. Break positions are in
+C<t_block_starts> / C<block_meta> (concatenated-sample coordinates), and each
+block's wall-clock C<t_start> is there too, so the elapsed gap at break I<b> is
+
+  epoch(t_start[b+1]) - epoch(t_start[b]) - n_samp[b] / fs
+
+Epoching must reject segments that straddle a C<t_block_starts> boundary.
+
+B<Changed in 0.2:> earlier versions inserted C<gap_samples> (default 100) zero
+samples at each break and reported them in C<gap_bounds>, so that a break was
+visible as a flat stretch. Those zeros are not data -- they ring through
+filters, corrupt spectra, and skew waveform-similarity metrics -- so the default
+is now 0 and C<gap_bounds> is empty unless C<gap_samples> is set explicitly.
+Concatenated-sample coordinates therefore shifted by 100 samples per preceding
+break. Channel layout is assumed constant across blocks; a mismatch is a fatal
+error. extblock files are a single data block, so C<all_blocks> is a no-op
+there.
 
 =item *
 

@@ -3,7 +3,7 @@ package PDL::EEG;
 use strict;
 use warnings;
 
-our $VERSION = '0.01';
+our  = '0.02';
 
 =head1 NAME
 

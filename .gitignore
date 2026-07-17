@@ -28,3 +28,4 @@ __MACOSX/
 !t/data/**
 *.bak
 *.bak
+t/data/*_long.eeg

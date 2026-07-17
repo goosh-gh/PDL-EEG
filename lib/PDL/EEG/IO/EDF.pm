@@ -9,7 +9,7 @@ use Encode qw(encode decode);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(write_edf read_edf clean_edf_label);
-our $VERSION   = '0.01';
+our $VERSION   = '0.02';
 
 =head1 NAME
 
@@ -31,7 +31,11 @@ PDL::EEG::IO::EDF - Write EEG records to EDF / EDF+ (European Data Format)
 Writes the hash returned by C<read_nk> as a 16-bit EDF file.  The record is
 expected to contain:
 
-  data    PDL [n_ch, n_samples] float32, physical units (uV)
+  data    PDL [n_ch, n_samples] float32, physical units (uV) -- ALWAYS uV,
+          for every channel, DC included. A DC channel cannot be WRITTEN in uV
+          (EDF's physical_min is 8 ASCII chars and "-12002900" is 9), so it is
+          written in mV and declared as such; {units} says which dimension each
+          signal goes out in / came in as. read_edf normalises back to uV.
   fs      sampling rate in Hz (integer)
   labels  arrayref of n_ch channel names
   events  (optional) arrayref of events -> EDF+ annotations
@@ -51,7 +55,10 @@ plain EDF file (no annotation channel).
   gain       => <num>    force one uV/bit for phys eq 'gain'; default uses
                          $rec->{gains} per channel (DC/STIM differ), else 0.09765625
   record_dur => 1.0      seconds per data record
-  unit       => 'uV'     physical dimension string
+  unit       => 'uV'     force ONE physical dimension on every signal. Without
+                         it, $rec->{units} (from read_nk) is used per signal, so
+                         EEG goes out as uV and DC as mV -- which is what EDF+
+                         wants and what the 8-char physical_min field requires.
   subject    => ''       subject CODE (written to the EDF+ patient-id field);
                          'patient' accepted as a deprecated alias
   sex        => 'X'      EDF+: 'M' | 'F' | 'X'
@@ -307,20 +314,48 @@ sub write_edf {
         @gain_ch = ($gain) x $n_ch;
     }
 
+    # --- PER-SIGNAL physical dimension --------------------------------------
+    #
+    # EDF gives every signal its own physical dimension, and here it is not a
+    # nicety -- it is forced. {data} is uniformly µV, but an EEG-1200A DC input is
+    # a ±12 V line, i.e. ±12002900 µV. EDF's physical_min field is EIGHT ASCII
+    # characters, and "-12002900" is nine. A DC channel simply CANNOT be written
+    # in µV. In mV it is "-12002.9" -- eight characters, exactly.
+    #
+    # So: {units} (from read_nk) says which dimension each channel should be
+    # written in; the samples are divided by $UV_PER{dim} on the way out, and the
+    # declared physical range is expressed in the same dimension. An explicit
+    # unit => '...' still forces one dimension on everything, as before.
+    my %UV_PER = ('uV' => 1, 'uv' => 1, 'µV' => 1, 'mV' => 1_000, 'mv' => 1_000);
+    my @dim_ch;
+    if (defined $o{unit}) {
+        @dim_ch = ($o{unit}) x $n_ch;                      # caller forced one unit
+    } elsif (ref $rec->{units} eq 'ARRAY' && @{ $rec->{units} } == $n_ch) {
+        @dim_ch = @{ $rec->{units} };
+    } else {
+        @dim_ch = ($unit) x $n_ch;
+    }
+    my @uvper = map { $UV_PER{ $dim_ch[$_] } // 1 } 0 .. $n_ch - 1;  # 'code' -> 1
+
     # --- per-channel physical/digital ranges -------------------------------
     my $DMIN = -32768;
     my $DMAX =  32767;
     my (@pmin, @pmax, @dig);                      # @dig: padded short piddles
     for my $c (0 .. $n_ch - 1) {
-        my $ch = $data->slice("($c),:");
+        # express this signal in ITS declared dimension (µV / uvper). For a µV
+        # channel uvper is 1 and nothing changes; for a DC channel written in mV
+        # it is 1000, and both the samples and the declared range shrink by 1000.
+        my $uvp = $uvper[$c] || 1;
+        my $ch  = $uvp == 1 ? $data->slice("($c),:")
+                            : $data->slice("($c),:") / $uvp;
         my ($pmn, $pmx);
         if ($phys eq 'auto') {
             ($pmn, $pmx) = $ch->minmax;
             if ($pmn == $pmx) { $pmn -= 1; $pmx += 1; }    # avoid /0 on flat ch
         } elsif ($phys eq 'gain') {
-            my $g = $gain_ch[$c] || $gain;
-            $pmn = $DMIN * $g;                             # e.g. -3200
-            $pmx = $DMAX * $g;                             #      3199.902...
+            my $g = ($gain_ch[$c] || $gain) / $uvp;        # µV/bit -> dim/bit
+            $pmn = $DMIN * $g;                             # e.g. -3200 µV, -12002.9 mV
+            $pmx = $DMAX * $g;
         } else {                                          # explicit +/- range
             my $r = abs($phys) || 1;
             $pmn = -$r; $pmx = $r;
@@ -419,7 +454,7 @@ sub write_edf {
     # per-signal fields (all signals for a given field are contiguous)
     my @sig_label = (map { _ascii($labels[$_], 16) } 0 .. $n_ch - 1);
     my @sig_trans = (_ascii('', 80)) x $n_ch;
-    my @sig_dim   = (map { _ascii($unit, 8) } 0 .. $n_ch - 1);
+    my @sig_dim   = (map { _ascii($dim_ch[$_], 8) } 0 .. $n_ch - 1);
     my @sig_pmin  = (map { _num($pmin[$_], 8) } 0 .. $n_ch - 1);
     my @sig_pmax  = (map { _num($pmax[$_], 8) } 0 .. $n_ch - 1);
     my @sig_dmin  = (($DMIN eq -32768 ? _ascii('-32768',8) : _num($DMIN,8))) x $n_ch;
@@ -500,6 +535,7 @@ sub read_edf {
         my ($base, $w, $i) = @_; $trim->(substr($sh, $base + $i*$w, $w));
     };
     my @label  = map { $col->(0,          16, $_) } 0..$ns-1;
+    my @pdim   = map { $trim->($col->(96*$ns, 8, $_)) } 0..$ns-1;   # 16+80
     my @pmin   = map { $col->(104*$ns,     8, $_) } 0..$ns-1;   # 16+80+8
     my @pmax   = map { $col->(112*$ns,     8, $_) } 0..$ns-1;
     my @dmin   = map { $col->(120*$ns,     8, $_) } 0..$ns-1;
@@ -549,19 +585,30 @@ sub read_edf {
 
     # build [n_ch, n_samp] float piddle in uV; interpret each signal's bytes
     # directly as int16 LE via get_dataref (~90x faster than unpack->pdl), scale.
+    #
+    # The physical dimension is PER SIGNAL and must be honoured. A DC channel is
+    # written in mV (it cannot be written in µV: EDF's physical_min is 8 ASCII
+    # chars and "-12002900" is 9), so its physical values come out 1000x smaller
+    # than everything else. Reading them as µV -- which this used to do -- turns a
+    # 4 V trigger into a 4 mV one. Normalise everything to µV here, and report the
+    # dimension each signal was stored in via {units}.
+    my %UV_PER = ('uV' => 1, 'uv' => 1, 'µV' => 1, 'mV' => 1_000, 'mv' => 1_000);
     my $n_ch   = scalar @sig;
     my $n_samp = length($sigbytes[$sig[0]]) / 2;
     my $data   = zeroes(float, $n_ch, $n_samp);
-    my @labels;
+    my (@labels, @units);
     for my $i (0 .. $#sig) {
         my $s = $sig[$i];
         push @labels, $label[$s];
+        push @units,  ($pdim[$s] // 'uV');
+        my $uvp  = $UV_PER{ $pdim[$s] // 'uV' } // 1;      # unknown dim -> as-is
         my $dd   = ($dmax[$s] - $dmin[$s]);
         my $gain = $dd ? ($pmax[$s] - $pmin[$s]) / $dd : 1;
         my $col  = zeroes(short, length($sigbytes[$s]) / 2);
         ${ $col->get_dataref } = $sigbytes[$s];
         $col->upd_data;
-        $data->slice("($i),:") .= ($col->float - $dmin[$s]) * $gain + $pmin[$s];
+        $data->slice("($i),:") .=
+            (($col->float - $dmin[$s]) * $gain + $pmin[$s]) * $uvp;
     }
 
     # parse EDF+ annotations -> events
@@ -597,9 +644,10 @@ sub read_edf {
         : undef;
 
     return {
-        data      => $data,
+        data      => $data,          # ALWAYS uV -- mV signals are normalised
         fs        => $fs,
         labels    => \@labels,
+        units     => \@units,        # the dimension each signal was STORED in
         t_start   => $t_start,
         events    => \@events,
         recording => $recording_fld,

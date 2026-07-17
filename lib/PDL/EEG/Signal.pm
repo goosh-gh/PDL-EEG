@@ -7,7 +7,7 @@ use PDL;
 use Exporter 'import';
 
 our @EXPORT_OK = qw(detect_square_pulses);
-our $VERSION   = '0.01';
+our $VERSION   = '0.02';
 
 =head1 NAME
 

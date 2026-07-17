@@ -1,5 +1,13 @@
 Revision history for PDL-EEG
 
+0.02   2026-07-17
+  BREAKING
+    - extblock multi-segment read; DC returned in µV (was 1000x low);
+      gap_samples default 0; DC numbering by format signature (unknown croaks).
+  ADDED
+    - mul_to_nk.pl --solve-bne; {units}/{n_samp_per_block}/{block_meta};
+      read_mul; per-signal EDF dimension; t/13; mk_synthetic_nk --long.
+
 0.01  2026-06-12
     - Initial release
     - PDL::EEG::IO::NihonKohden: read Nihon Kohden EEG-1100C binary files
