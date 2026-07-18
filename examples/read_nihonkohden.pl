@@ -536,7 +536,7 @@ $gs->show_interactive(
     init   => { 0 => 0.0, 1 => $sv_init },
     render => sub {
         my ($state, $w, $h) = @_;
-
+        # warn sprintf("SLIDER state0=%.4f state1=%.4f\n", $state->{0}//-1, $state->{1}//-1); ### debug for slider position version 0.02
         # --- Slider 0: time offset within [r_lo, r_hi) (LOCAL samples) ---
         my $n_show     = int($nsec * $fs);
         $n_show        = 1         if $n_show < 1;
