@@ -79,7 +79,7 @@ my @GAIN_TABLE = (
 );
 
 # Default electrode label table
-# 0-indexed, matching .21e file format (confirmed from EEG-1100C YJ0394VB.21E).
+# 0-indexed, matching .21e file format (confirmed from EEG-1100C subject.21E).
 # ch_idx in waveform block is 1-indexed → subtract 1 before lookup.
 my @DEFAULT_LABELS = (
     # 0-19: standard 10-20 + extras
@@ -537,6 +537,15 @@ sub read_nk {
         $log_path = "$base.log" unless -f $log_path;
         @events = _read_log($log_path) if -f $log_path;
     }
+    # Place events at their data-sample position, but only for a concatenated
+    # multi-block session (all_blocks): there the .LOG's REC START markers
+    # delimit the blocks and block_meta carries each block's exact start_samp,
+    # so _attach_recstart_samp is exact (same as the extblock path; within a
+    # block wall-clock and data advance 1:1). It self-guards on REC START count
+    # == block count and is a no-op otherwise. For a single-block read the .LOG
+    # is session-wide while the data is one block, so we do NOT place events
+    # (they keep {t,label,epoch} only, as before) rather than guess.
+    _attach_recstart_samp(\@events, \@block_meta, $fs) if @block_meta > 1;
 
     close $fh;
 
@@ -613,7 +622,7 @@ sub _read_wfm_block {
 # ---------------------------------------------------------------------------
 # Internal: extblock layout reader (EEG-1200A and family)
 #
-# Confirmed from real data JJ0090J6.EEG (recorder EEG-1290, MMN, 38ch, 1000Hz;
+# Confirmed from real data subject.EEG (recorder EEG-1290, MMN, 38ch, 1000Hz;
 # format signature "EEG-1200A V01.00"). Channel info lives in the extended
 # block chain, not the wfmblock. Data: sample-interleaved uint16 LE, offset
 # binary (center 0x8000). n_samples computed from file size. Gain fixed (µV for
@@ -766,10 +775,19 @@ sub _read_extblock {
         @events = _read_log($lp) if -f $lp;
     }
     # Segment boundaries and their wall-clock starts are now known exactly, from
-    # the embedded block headers -- so events can be placed against real anchors
-    # instead of _attach_epoch_samp()'s uniform-epoch approximation.
-    _attach_seg_samp(\@events, \@block_meta, $fs)
-        or _attach_epoch_samp(\@events, $n_samp, $fs);
+    # the embedded block headers. Prefer _attach_recstart_samp: it delimits
+    # segments by the .LOG REC START markers, anchors each to the exact header
+    # boundary (block_meta start_samp), and places within a segment by the .LOG
+    # time offset from that segment's REC START -- exact, because within a
+    # segment wall-clock and data advance 1:1. Fall back to the uniform-epoch
+    # page map, then to the wall-clock seg map. (_attach_seg_samp assumes .LOG
+    # time equals the block-header wall-clock; on real recordings the .LOG clock
+    # also counts paused setup time between blocks, so that assumption drifts by
+    # tens to hundreds of seconds and misfiles late-segment events -- see
+    # t/08_epoch.t.)
+    _attach_recstart_samp(\@events, \@block_meta, $fs)
+        or _attach_epoch_samp(\@events, $n_samp, $fs)
+        or _attach_seg_samp(\@events, \@block_meta, $fs);
 
     close $fh;
 
@@ -884,6 +902,45 @@ sub _bcd_time {
         map { _bcd_byte($fh, $addr + 0x14 + $_) } 0 .. 5);
 }
 
+# Place .LOG events using the REC START markers as segment delimiters. Each
+# REC START opens a segment; its exact data-sample start is block_meta's
+# start_samp (from the embedded block header), and within a segment wall-clock
+# and data advance 1:1 with no gaps, so an event's data offset is simply its
+# .LOG time minus the opening REC START's .LOG time. This is exact and does not
+# depend on what the .LOG's absolute clock means (it counts paused setup time
+# between blocks, which is why _attach_seg_samp's wall-clock assumption drifts).
+#
+# Requires the REC START count to equal the segment count (1:1 delimiters);
+# otherwise returns 0 so the caller falls back to the epoch-page map. Events
+# before the first REC START anchor to segment 0.
+sub _attach_recstart_samp {
+    my ($events, $meta, $fs) = @_;
+    return 0 unless $events && @$events && $meta && @$meta && $fs;
+    my @rec = grep { ($_->{label} // '') =~ /REC\s*START/i } @$events;
+    return 0 unless @rec == @$meta;                    # 1:1 delimiters required
+
+    my $seg = -1;
+    my $anchor_t    = 0;
+    my $anchor_samp = $meta->[0]{start_samp};
+    my $seg_end     = $meta->[0]{start_samp} + $meta->[0]{n_samp} - 1;
+    for my $e (@$events) {
+        if (($e->{label} // '') =~ /REC\s*START/i) {
+            $seg++;
+            $anchor_t    = $e->{t} // 0;
+            $anchor_samp = $meta->[$seg]{start_samp};
+            $seg_end     = $anchor_samp + $meta->[$seg]{n_samp} - 1;
+        }
+        my $off = ($e->{t} // 0) - $anchor_t;
+        $off = 0 if $off < 0;
+        my $s = $anchor_samp + int($off * $fs + 0.5);
+        $s = $anchor_samp if $s < $anchor_samp;
+        $s = $seg_end     if $s > $seg_end;            # clamp into this segment
+        $e->{samp}   = $s;
+        $e->{t_data} = $s / $fs;
+    }
+    return 1;
+}
+
 # Place .LOG events using the real segment anchors: within a segment wall-clock
 # and data advance 1:1, so a wall-clock time t inside segment b maps to
 #     samp = start_samp[b] + (t - t_start[b]) * fs
@@ -924,7 +981,7 @@ sub _epoch_of {
 # ---------------------------------------------------------------------------
 # Internal: waveform block header parse
 #
-# Confirmed structure from real EEG-1100C file (YJ0394VB.EEG, 2025-12-21):
+# Confirmed structure from real EEG-1100C file (subject.EEG, 2025-12-21):
 #   +0x00        : 0x01  block type
 #   +0x01..+0x10 : ASCII time string "TIME164330000000" (16 bytes)
 #   +0x14..+0x19 : BCD timestamp  YY MM DD HH MM SS
@@ -1451,25 +1508,66 @@ sub select_range {
     };
 }
 
+# Anchors for the wall-clock -> data-sample map, as { t, samp[, end] } with t in
+# seconds from the recording start. The map is 1:1 within a segment with a jump
+# at each recording break, so a single anchor per segment (its wall-clock start
+# and its data-sample start) is enough.
+#
+# Source, in preference order:
+#   1. block_meta when it resolves >1 segment. Each block's t_start is a real
+#      wall-clock start (wfmblock: per block; extblock: from the embedded block
+#      header), so this is authoritative and needs no .LOG. This is the same
+#      map _attach_seg_samp() uses to place events. It is what fixes wall-clock
+#      queries on multi-block recordings, where there are no REC START events
+#      and the old code silently fell back to a 1:1 (wall==data) map.
+#   2. REC START markers, for a hand-built rec or a file whose segment headers
+#      did not resolve but whose .LOG carries REC START events with {samp}.
+# With neither, the caller gets a 1:1 map (correct for a single continuous
+# segment).
+sub _clock_anchors {
+    my ($rec) = @_;
+    my $meta = $rec->{block_meta} || [];
+    if (@$meta > 1) {
+        my @ep = map { _epoch_of($_->{t_start}) } @$meta;
+        unless (grep { !defined } @ep) {
+            my $t0 = $ep[0];
+            return map {
+                { t    => $ep[$_] - $t0,
+                  samp => $meta->[$_]{start_samp},
+                  end  => $meta->[$_]{start_samp} + $meta->[$_]{n_samp} - 1 }
+            } 0 .. $#$meta;
+        }
+    }
+    my @ev = grep { defined $_->{samp} && defined $_->{t}
+                    && ($_->{label} // '') =~ /REC\s*START/i }
+             @{ $rec->{events} || [] };
+    return sort { $a->{t} <=> $b->{t} }
+           map { { t => $_->{t}, samp => $_->{samp} } } @ev;
+}
+
 # Convert a wall-clock time (seconds from recording start) to a data-sample
-# index, using REC START events as anchors (within a segment, wall-clock and
-# data advance 1:1). Requires events with both {t} and {samp} (epoch-based).
+# index. Uses the block_meta piecewise-linear map (see _clock_anchors); within
+# a segment wall-clock and data advance 1:1, and a query that lands in a
+# recording gap clamps to the last real sample of the preceding segment rather
+# than inventing samples that are not in the data.
 sub clock_to_samp {
     my ($rec, $wall_sec) = @_;
     my $fs = $rec->{fs} || 1;
     my $n  = eval { $rec->{data}->dim(1) } // 0;
-    my @anch = grep { defined $_->{samp} && defined $_->{t}
-                      && ($_->{label} // '') =~ /REC\s*START/i }
-               @{ $rec->{events} || [] };
-    @anch = sort { $a->{t} <=> $b->{t} } @anch;
+
+    my @anch = _clock_anchors($rec);
     return int($wall_sec * $fs + 0.5) unless @anch;   # no anchors: assume 1:1
 
     my $best;
     for my $a (@anch) { $best = $a if $a->{t} <= $wall_sec; }
     $best ||= $anch[0];
-    my $s = $best->{samp} + int(($wall_sec - $best->{t}) * $fs + 0.5);
-    $s = 0        if $s < 0;
-    $s = $n - 1   if $n && $s > $n - 1;
+
+    my $s   = $best->{samp} + int(($wall_sec - $best->{t}) * $fs + 0.5);
+    my $end = defined $best->{end} ? $best->{end} : ($n ? $n - 1 : $s);
+    $s = $best->{samp} if $s < $best->{samp};   # clamp into this segment
+    $s = $end          if $s > $end;
+    $s = 0             if $s < 0;
+    $s = $n - 1        if $n && $s > $n - 1;     # never past the data
     return $s;
 }
 

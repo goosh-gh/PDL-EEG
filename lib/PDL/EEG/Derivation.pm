@@ -18,7 +18,7 @@ PDL::EEG::Derivation - Linear channel derivations (re-reference, bipolar, ...)
   use PDL::EEG::IO::NihonKohden qw(read_nk);
   use PDL::EEG::Derivation      qw(bne derive);
 
-  my $rec = read_nk('JJ0090J6.EEG', all_blocks => 1);
+  my $rec = read_nk('subject.EEG', all_blocks => 1);
 
   # Balanced non-cephalic (BNE) re-reference: y = x - (prop*BN1 + (1-prop)*BN2)
   my $bn = bne($rec, prop => 0.5, suffix => '-BN');   # BN1=V, BN2=S

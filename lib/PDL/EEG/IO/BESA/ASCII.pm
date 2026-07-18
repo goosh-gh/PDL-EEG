@@ -263,7 +263,7 @@ Read a BESA ASCII multiplexed file back into a record matching the C<read_nk>
 contract. Written to close the loop: the Nihon Kohden viewer exports C<.mul>
 itself, so a reader lets us diff our own conversion against the vendor's.
 
-  my $m = read_mul('JJ0090J6.m01');
+  my $m = read_mul('subject.m01');
   #  { data => PDL[n_ch,n_samp] float (uV), fs, labels => [...],
   #    t_start => "YYYY-MM-DD HH:MM:SS" | undef, n_report, trig_idx,
   #    bins_per_uv, begin_ms, segment, header => { raw key => value } }
@@ -277,7 +277,7 @@ Both column layouts are handled:
 and the same thing without the leading C<Date>/C<Time> columns (what write_mul
 emits). The prefix columns are detected from the label row, not assumed.
 
-WHAT THE VENDOR'S OWN EXPORT LOOKS LIKE (JJ0090J6.m01, EEG-1200A), because it is
+WHAT THE VENDOR'S OWN EXPORT LOOKS LIKE (subject.m01, EEG-1200A), because it is
 not what the docs led us to expect:
 
 =over

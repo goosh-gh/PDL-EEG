@@ -9,8 +9,8 @@ pm_to_blib
 download/
 
 # test datas
-./JJ0090J6.edf.ascii_21_376.mul
-./JJ0090J6.21_376.ascii_whole_21_376.mul
+./subject.edf.ascii_21_376.mul
+./subject.21_376.ascii_whole_21_376.mul
 
 # Generated test data (run: make testdata)
 t/data/
@@ -29,3 +29,4 @@ __MACOSX/
 *.bak
 *.bak
 t/data/*_long.eeg
+RELEASE_STEPS.md

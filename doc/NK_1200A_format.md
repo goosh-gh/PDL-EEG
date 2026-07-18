@@ -4,7 +4,7 @@
 **物理機種名とは別物**。実機 EEG-1290（ヘッドボックス JE-92NX）で記録しても
 署名は `EEG-1200A V01.00`。
 
-実データ `JJ0090J6.EEG`（EEG-1290 / MMN, 38ch, 1000Hz）で確定。
+実データ `subject.EEG`（EEG-1290 / MMN, 38ch, 1000Hz）で確定。
 参照: Brainstorm `in_fopen_nk.m`, NK2EDF。仕様参照の独自実装（コード非コピー）。
 実装は `PDL::EEG::IO::NihonKohden`（`_read_extblock` ＋ 既存 wfmblock 経路）。
 

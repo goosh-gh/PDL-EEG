@@ -1,8 +1,8 @@
 #!/usr/bin/env perl
 # Real-data smoke test for the --bne re-reference path.
 #
-#   perl -Ilib xt/smoke_bne.pl /path/to/JJ0090J6.EEG      # nk_to_mul
-#   perl -Ilib xt/smoke_bne.pl /path/to/JJ0090J6.edf      # edf_to_mul
+#   perl -Ilib xt/smoke_bne.pl /path/to/subject.EEG      # nk_to_mul
+#   perl -Ilib xt/smoke_bne.pl /path/to/subject.edf      # edf_to_mul
 #
 # Runs the appropriate converter WITH and WITHOUT --bne on a real recording and
 # checks structural invariants (no ground-truth values needed):

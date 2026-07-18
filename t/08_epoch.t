@@ -79,4 +79,89 @@ is clock_to_samp($rec, 0), 0, 'wall 0 maps to 0';
     ok $ev[4]{t_data} < $nt/1000, 'final CAL within data length';
 }
 
+# --- clock_to_samp via block_meta (wfmblock multi-block, NO events) -----------
+# P:EEG13: with per-block wall-clock t_start in block_meta and no REC START
+# events, wall-clock must follow the piecewise map, not a 1:1 map. Three 3 s
+# segments @100 Hz, real 10 s wall-clock gaps between them; data butt-joined to
+# 0..299 / 300..599 / 600..899. (clock_to_samp uses only epoch DIFFERENCES, so
+# these are timezone-independent.)
+{
+    my $n2 = 900;
+    my $d2 = sequence($n2)->dummy(0, 3)->sever->float;
+    my $recw = {
+        data => $d2, fs => 100, labels => [qw(a b c)], events => [],
+        t_start    => '2026-07-02 14:03:03',
+        block_meta => [
+            { start_samp => 0,   n_samp => 300, t_start => '2026-07-02 14:03:03' },
+            { start_samp => 300, n_samp => 300, t_start => '2026-07-02 14:03:16' },
+            { start_samp => 600, n_samp => 300, t_start => '2026-07-02 14:03:29' },
+        ],
+        n_blocks => 3,
+    };
+    is clock_to_samp($recw, 1),  100, 'block_meta: wall 1s  -> 100 (seg0, 1:1 inside)';
+    is clock_to_samp($recw, 14), 400, 'block_meta: wall 14s -> 400 (seg1, NOT 1400)';
+    is clock_to_samp($recw, 26), 600, 'block_meta: wall 26s -> 600 (seg2 start)';
+    is clock_to_samp($recw, 8),  299, 'block_meta: wall 8s in a gap -> 299 (clamp seg0 end)';
+    is clock_to_samp($recw, 40), 899, 'block_meta: past end -> 899 (data end)';
+}
+
+# --- _attach_recstart_samp: REC START-delimited exact placement --------------
+# Real-data regression (subject.EEG): the .LOG clock counts paused setup time
+# between blocks, so wall-clock placement drifts and late-segment events get
+# misfiled / clamped to the data end. REC START-delimited placement anchors each
+# segment to its exact header boundary and is drift-free.
+{
+    my $fs2  = 1000;
+    my $meta = [
+        { start_samp=>0,      n_samp=>205000, t_start=>'2026-07-02 14:03:03' },
+        { start_samp=>205000, n_samp=>176000, t_start=>'2026-07-02 14:07:52' },
+        { start_samp=>381000, n_samp=>30000,  t_start=>'2026-07-02 14:11:34' },
+        { start_samp=>411000, n_samp=>214000, t_start=>'2026-07-02 14:12:21' },
+        { start_samp=>625000, n_samp=>206000, t_start=>'2026-07-02 14:16:41' },
+        { start_samp=>831000, n_samp=>62000,  t_start=>'2026-07-02 14:20:34' },
+        { start_samp=>893000, n_samp=>69000,  t_start=>'2026-07-02 14:21:48' },
+        { start_samp=>962000, n_samp=>19000,  t_start=>'2026-07-02 14:23:02' },
+    ];
+    my @ev = map { { t=>$_->[0], label=>$_->[1] } } (
+        [16,'task1'], [325,'REC START MMN EEG'], [327,'task2'],
+        [621,'REC START MMN EEG'], [625,'task3 practice'],
+        [651,'REC START MMN EEG'], [654,'task4'],
+        [1025,'REC START MMN EEG'], [1033,'task5'],
+        [1351,'REC START MMN EEG'], [1355,'安静開眼'],
+        [1453,'REC START MMN EEG'], [1456,'安静閉眼'],
+        [1602,'REC START MMN CAL'],
+    );
+    # prepend seg0's REC START so REC START count (8) == segment count (8)
+    unshift @ev, { t=>0, label=>'REC START MMN CAL' };
+
+    my $ok = PDL::EEG::IO::NihonKohden::_attach_recstart_samp(\@ev, $meta, $fs2);
+    ok $ok, '_attach_recstart_samp fired (8 REC STARTs == 8 segments)';
+
+    my %s = map { $_->{label} => $_->{samp} } @ev;
+    is $s{task1},           16000,  'task1  -> 16000 (seg0)';
+    is $s{task2},           207000, 'task2  -> 207000 (seg1, +2s; NOT 243000)';
+    is $s{'task3 practice'},385000, 'task3  -> 385000 (seg2, correct segment)';
+    is $s{task4},           414000, 'task4  -> 414000 (seg3)';
+    is $s{task5},           633000, 'task5  -> 633000 (seg4; not clamped to end)';
+    is $s{'安静開眼'},       835000, '安静開眼 -> 835000 (seg5)';
+    is $s{'安静閉眼'},       896000, '安静閉眼 -> 896000 (seg6)';
+
+    # every event lands inside its own segment (no cross-segment misfiling)
+    my $inside = 1;
+    for my $e (@ev) {
+        my $in = 0;
+        for my $m (@$meta) {
+            $in = 1 if $e->{samp} >= $m->{start_samp}
+                    && $e->{samp} <  $m->{start_samp} + $m->{n_samp};
+        }
+        $inside = 0 unless $in;
+    }
+    ok $inside, 'all events land inside a real segment (none clamped to data end)';
+
+    # count-mismatch -> returns 0 so the caller can fall back
+    my @ev2 = ({ t=>0, label=>'task only' });
+    my $r2  = PDL::EEG::IO::NihonKohden::_attach_recstart_samp(\@ev2, $meta, $fs2);
+    is $r2, 0, 'REC START count != segment count -> 0 (fall back)';
+}
+
 done_testing();
