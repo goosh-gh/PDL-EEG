@@ -19,10 +19,10 @@ PDL::EEG::IO::NihonKohden::Montage - Resolve channel labels from .LOG montage + 
   use PDL::EEG::IO::NihonKohden qw(read_nk);
   use PDL::EEG::IO::NihonKohden::Montage qw(resolve_labels);
 
-  my $rec = read_nk('YJ0394VB.EEG', all_blocks => 1);
+  my $rec = read_nk('subject.EEG', all_blocks => 1);
 
   my $r = resolve_labels($rec,
-      ptn_dir => 'YJ0394VB.PTN',   # dir of Pattern_0NN.PTN (optional)
+      ptn_dir => 'subject.PTN',   # dir of Pattern_0NN.PTN (optional)
       apply   => 1,                # rewrite $rec->{labels} in place
   );
   # $r->{montage}   e.g. "IIA"  (recording montage, from .LOG)
@@ -30,7 +30,7 @@ PDL::EEG::IO::NihonKohden::Montage - Resolve channel labels from .LOG montage + 
   # $r->{label_map} { 45=>'TrigBit0', 46=>'TrigBit2', ... }  (feed back to read_nk)
 
   # then, for a byte-clean result, re-read with the map:
-  my $rec2 = read_nk('YJ0394VB.EEG', all_blocks=>1, label_map => $r->{label_map});
+  my $rec2 = read_nk('subject.EEG', all_blocks=>1, label_map => $r->{label_map});
 
 =head1 DESCRIPTION
 

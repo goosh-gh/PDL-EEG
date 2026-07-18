@@ -11,9 +11,11 @@
 #   --cut-clock SPEC   same, but ranges are WALL-CLOCK "HH:MM:SS" (as shown in
 #                      the vendor viewer), e.g. "14:06:14-14:07:15:task2".
 #                      A single range is fine; repeat the command for more.
-#                      Wall-clock mapping assumes a continuous recording; if
-#                      --allblocks spans a discontinuity, use data-coordinate
-#                      --cut instead.
+#                      Wall-clock is mapped to data samples through the
+#                      block_meta piecewise map, so recording breaks are handled
+#                      (a time that lands in a gap clamps to the last real
+#                      sample before it). For wfmblock files, add --allblocks so
+#                      block_meta spans every segment.
 #   --bne[=PROP]       re-reference to the balanced non-cephalic (BNE) reference
 #                      before writing: y = x - (PROP*BN1 + (1-PROP)*BN2). PROP
 #                      defaults to 0.5 (the BN balance is set in analog hardware,
@@ -30,7 +32,7 @@ use strict;
 use warnings;
 use lib 'lib';
 use PDL;
-use PDL::EEG::IO::NihonKohden qw(read_nk);
+use PDL::EEG::IO::NihonKohden qw(read_nk clock_to_samp);
 use PDL::EEG::IO::BESA::ASCII qw(write_mul);
 use PDL::EEG::Derivation      qw(bne);
 use Getopt::Long;
@@ -62,7 +64,9 @@ sub select_range {                 # end-exclusive: keep samples [lo, hi)
     my $data = $rec->{data}->slice(":," . $lo . ":" . ($hi - 1))->sever;
     return { %$rec, data => $data };
 }
-sub clock_to_samp { my ($rec, $sec) = @_; int($sec * $rec->{fs} + 0.5) }
+# clock_to_samp is imported from PDL::EEG::IO::NihonKohden: it maps wall-clock
+# seconds -> data sample via the block_meta piecewise-linear map, so --cut-clock
+# is correct across recording breaks (was a naive wall==data 1:1 map here).
 
 # apply montage suffix + trig/decimal opts, then write one .mul
 sub write_out {

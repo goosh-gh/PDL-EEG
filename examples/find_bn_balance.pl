@@ -6,7 +6,7 @@
 # We now KNOW the BN balance for several recordings, measured against the vendor's
 # own .mul export (mul_to_nk.pl --solve-bne):
 #
-#     JJ0090J6  (EEG-1200A)  p = 0.7093
+#     subject  (EEG-1200A)  p = 0.7093
 #     IJ0200S9  (EEG-1260Next / 1200-family) p = 0.6394, logged as 0.65
 #
 # The balance is a hardware pot setting, so it MUST be stored somewhere for the

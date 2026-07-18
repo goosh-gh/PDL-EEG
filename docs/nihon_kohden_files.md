@@ -1,8 +1,8 @@
 # Nihon Kohden EEG-1200A recording bundle — file reference
 
 Files written by a Neurofax EEG-1200A (headbox JE-208A / JE-92NX) for one
-recording, e.g. `JJ0090J6.*`. Basename is shared; each extension carries a
-different part of the session. Verified against the `JJ0090J6` MMN recording
+recording, e.g. `subject.*`. Basename is shared; each extension carries a
+different part of the session. Verified against the `subject` MMN recording
 (2026-07-02). "★" marks files that carry reference / montage information.
 
 ## Core signal & metadata

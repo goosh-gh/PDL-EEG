@@ -1,5 +1,26 @@
 Revision history for PDL-EEG
 
+0.03   2026-07-18
+  BREAKING
+    - .LOG events now carry data-sample positions ({samp}/{t_data}). extblock
+      placement corrected: the .LOG elapsed-seconds clock also counts paused
+      time between recording blocks, so anchoring events to it drifted them by
+      tens to hundreds of seconds and misfiled late segments (some clamped to
+      the data end). Events are now placed by REC START-delimited segments
+      against exact block boundaries; task-marker positions in multi-segment
+      files change (and are now correct). Re-epoch any saved event positions.
+  ADDED
+    - clock_to_samp() maps wall-clock to samples through block_meta (piecewise,
+      break-aware); nk_to_mul.pl --cut-clock is now correct across recording
+      breaks (was a naive wall==data map that leaked the next block into a cut).
+    - wfmblock: .LOG events are placed for concatenated multi-block reads
+      (all_blocks); previously wfmblock events had no sample position at all.
+    - xt/70_real_data.t: real-data event-placement regression (extblock +
+      wfmblock; REC STARTs land exactly on block boundaries).
+  FIXED
+    - lib/PDL/EEG.pm: malformed $VERSION line (the module did not compile;
+      `use PDL::EEG` died). Also refreshed the module list (EDF is implemented).
+
 0.02   2026-07-17
   BREAKING
     - extblock multi-segment read; DC returned in µV (was 1000x low);

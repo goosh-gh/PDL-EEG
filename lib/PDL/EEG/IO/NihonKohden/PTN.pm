@@ -24,7 +24,7 @@ PDL::EEG::IO::NihonKohden::PTN - Read Nihon Kohden Neurofax pattern (montage) fi
           $ch->{trigger} ? " (trigger)" : "";
   }
 
-  my $path = find_montage_file('/path/to/YJ0394VB.PTN', 'IIA');
+  my $path = find_montage_file('/path/to/subject.PTN', 'IIA');
 
 =head1 DESCRIPTION
 

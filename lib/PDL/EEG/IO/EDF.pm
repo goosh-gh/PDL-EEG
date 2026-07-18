@@ -20,7 +20,7 @@ PDL::EEG::IO::EDF - Write EEG records to EDF / EDF+ (European Data Format)
   use PDL::EEG::IO::NihonKohden qw(read_nk);
   use PDL::EEG::IO::EDF         qw(write_edf);
 
-  my $rec = read_nk('YJ0394VB.EEG');       # { data,fs,labels,events,... }
+  my $rec = read_nk('subject.EEG');       # { data,fs,labels,events,... }
   write_edf($rec, 'out.edf');              # EDF+C, events -> annotations
 
   # Plain EDF (no annotation channel), byte-compatible physical scaling:

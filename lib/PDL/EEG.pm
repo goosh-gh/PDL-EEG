@@ -3,7 +3,7 @@ package PDL::EEG;
 use strict;
 use warnings;
 
-our  = '0.02';
+our $VERSION = '0.03';
 
 =head1 NAME
 
@@ -17,7 +17,7 @@ PDL::EEG - EEG analysis toolkit for PDL (MNE-Python inspired)
   # $rec->{data}   [n_ch, n_samples] float32 µV
   # $rec->{fs}     sampling rate Hz
   # $rec->{labels} channel labels
-  # $rec->{events} [{t=>$sec, label=>$str}, ...]
+  # $rec->{events} [{t=>$sec, label=>$str, samp=>$n, t_data=>$sec}, ...]
 
 =head1 DESCRIPTION
 
@@ -26,8 +26,10 @@ aiming to provide functionality comparable to MNE-Python.
 
 Current modules:
 
-  PDL::EEG::IO::NihonKohden   Read Nihon Kohden *.eeg binary files
-  PDL::EEG::IO::EDF            (planned) Read EDF/EDF+ files
+  PDL::EEG::IO::NihonKohden   Read Nihon Kohden *.eeg (EEG-1100 + EEG-1200)
+  PDL::EEG::IO::EDF           Read/write EDF/EDF+ files
+  PDL::EEG::IO::BESA::ASCII   Write BESA ASCII multiplexed (.mul)
+  PDL::EEG::Derivation        Linear derivation, re-reference, balanced non-cephalic
   PDL::EEG::Epochs             (planned) Epoch extraction
   PDL::EEG::Evoked             (planned) Averaged ERP
   PDL::EEG::Viewer             (planned) Interactive raw viewer (raw.show())

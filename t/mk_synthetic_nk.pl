@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 # t/mk_synthetic_nk.pl — synthetic EEG-1100C test file
 #
-# Confirmed layout from real hardware (YJ0394VB.EEG):
+# Confirmed layout from real hardware (subject.EEG):
 #   +0x00        : 0x01
 #   +0x01..+0x10 : "TIME164330000000"
 #   +0x11        : 0x00

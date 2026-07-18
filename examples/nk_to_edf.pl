@@ -39,7 +39,7 @@ my $in  = shift @ARGV or die "usage: $0 INPUT.EEG [OUTPUT.edf] [--options]\n";
 my $out = shift @ARGV;
 unless (defined $out) { ($out = $in) =~ s/\.[^.]+$//; $out .= '.edf'; }
 
-# subject default: input file basename without extension (e.g. JJ0090J6)
+# subject default: input file basename without extension (e.g. subject)
 unless (length $opt{subject}) {
     (my $stem = $in) =~ s{.*/}{};      # strip directory
     $stem =~ s/\.[^.]+$//;             # strip extension
