@@ -29,6 +29,7 @@ Current modules:
   PDL::EEG::IO::NihonKohden   Read Nihon Kohden *.eeg (EEG-1100 + EEG-1200)
   PDL::EEG::IO::EDF           Read/write EDF/EDF+ files
   PDL::EEG::IO::BESA::ASCII   Write BESA ASCII multiplexed (.mul)
+  PDL::EEG::IO::ASA           Read ASA electrode positions (.elc) for 3D display
   PDL::EEG::Derivation        Linear derivation, re-reference, balanced non-cephalic
   PDL::EEG::Epochs             (planned) Epoch extraction
   PDL::EEG::Evoked             (planned) Averaged ERP

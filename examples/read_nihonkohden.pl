@@ -643,24 +643,23 @@ $gs->show_interactive(
             $n_seen++;
             $dashed->($bx, $y_lo, $y_hi);
 
-            # P:G:C text() is left-anchored; do NOT rely on a halign option.
-            # Place by hand from an estimated text width, or the two labels
-            # collide on top of each other at the line.
+            # P:G:C text() now honours halign (P:G:C14): anchor by right/left/
+            # center instead of hand-subtracting an estimated text width.
             my $kw   = $b->{kind} eq 'seg' ? 'seg' : 'block';
             my $lft  = sprintf('%s %d', $kw, $b->{prev});
             my $rgt  = sprintf('%s %d', $kw, $b->{next});
             my $dts  = sprintf("\x{25B2} %s skipped", fmt_dt($b->{dt}));
             my $u    = $span / $plot_w;               # data units per pixel
-            my $cw   = 5.4 * $u;                      # ~char width at fontsize 8
-            my $pad  = 10 * $u;                       # clear of the line itself
+            my $pad  = 10 * $u;                        # clear of the line itself (data coords)
 
-            $ax->text($bx - $pad - length($lft) * $cw, $y_lab, $lft,
-                      fontsize => 8, color => $BRK, valign => 'bottom');
+            # left label ends just left of the line; right label starts just right of it.
+            $ax->text($bx - $pad, $y_lab, $lft,
+                      fontsize => 8, color => $BRK, halign => 'right', valign => 'bottom');
             $ax->text($bx + $pad, $y_lab, $rgt,
-                      fontsize => 8, color => $BRK, valign => 'bottom');
+                      fontsize => 8, color => $BRK, halign => 'left', valign => 'bottom');
             # centred under the line, on the row below the block names
-            $ax->text($bx - length($dts) * $cw / 2, $y_dt, $dts,
-                      fontsize => 8, color => $BRK, valign => 'bottom');
+            $ax->text($bx, $y_dt, $dts,
+                      fontsize => 8, color => $BRK, halign => 'center', valign => 'bottom');
         }
 
         # No break in view? Then the block number is not shown anywhere above, so

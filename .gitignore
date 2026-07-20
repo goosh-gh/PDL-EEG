@@ -30,3 +30,10 @@ __MACOSX/
 *.bak
 t/data/*_long.eeg
 RELEASE_STEPS.md
+Makefile.old
+/standard_1020.elc
+*.xyz
+*.obj
+*.mtl
+nyhead19.txt
+sa_nyhead.mat

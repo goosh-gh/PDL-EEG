@@ -1,5 +1,22 @@
 Revision history for PDL-EEG
 
+0.04   (unreleased)
+  ADDED
+    - PDL::EEG::IO::ASA: read ASA electrode-position files (.elc), the library
+      form of the PDL Advent Calendar 2024 (Day 12) parser. read_elc() returns
+      a (3,N) coordinate piddle, parallel labels, a name->xyz lookup, unit /
+      reference metadata, and detected fiducials (LPA/RPA/Nz). Robust to
+      indented coordinate blocks and CRLF; the coordinate block is parsed
+      vectorised (flat list -> reshape) rather than row-by-row. The declared
+      NumberPositions= is cross-checked and a mismatch is carped.
+    - parse_ELEC_POS3D_ASA_4AdventCalendar(): drop-in shim reproducing the
+      Advent parser's four-value return, so existing scripts keep working.
+    - examples/show_electrodes_3d.pl: 3D scalp-electrode viewer over read_elc,
+      with GS3D (PDL::Graphics::Cairo::Driver::GS3D) and TriD backends; both
+      renderers are optional (loaded on demand, not added to prereqs).
+    - t/14_asa.t and t/data/standard_1020_subset.elc: 28-point real-coordinate
+      fixture (19ch + Fpz/Oz + M1/M2 + A1/A2 + LPA/RPA/Nz).
+
 0.03   2026-07-18
   BREAKING
     - .LOG events now carry data-sample positions ({samp}/{t_data}). extblock

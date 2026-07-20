@@ -21,6 +21,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `PDL::EEG::IO::NihonKohden::Montage` | `.LOG` montage name + `.PTN` + signal → `label_map`; `resolve_labels`. |
 | `PDL::EEG::IO::EDF` | `write_edf` (EDF / EDF+C) and `read_edf` (round-trips the `read_nk` contract); `clean_edf_label` normalises EDF+ signal labels. |
 | `PDL::EEG::IO::BESA::ASCII` | `write_mul` — BESA ASCII multiplexed (`.mul`) export. |
+| `PDL::EEG::IO::ASA` | `read_elc` — read ASA electrode-position files (`.elc`). Returns `coords [3,N]` (native unit, MNI mm), parallel `labels`, name→xyz `pos`, `unit`/`reference`, and auto-detected `fiducials` (LPA/RPA/Nz). Robust to indented blocks/CRLF; coordinates parsed vectorised. `parse_ELEC_POS3D_ASA_4AdventCalendar` is a drop-in shim for the PDL Advent Calendar 2024 (Day 12) parser. |
 | `PDL::EEG::Derivation` | `derive` (general linear derivation `y = M·x`), `bne` (balanced non-cephalic re-reference), `rereference` (single/linked/average). |
 | `PDL::EEG::Signal` | Device-independent square-pulse / TTL detector. |
 
@@ -36,6 +37,10 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/find_bn_balance.pl`, `examples/find_bn_diff.pl` | Search NK header files for where a known BN balance is stored (investigative; see caveats) |
 | `xt/verify_read.pl` | Real-data (or synthetic) `read_nk` sanity check, independent of `make test` |
 | `xt/smoke_bne.pl` | Author smoke test: `--bne` on a real `.EEG`/`.edf` |
+| `examples/show_electrodes_3d.pl` | 3D scalp-electrode viewer over `read_elc` (GS3D or TriD backend); ships a 28-point fixture. Needs `PDL::Graphics::Cairo` (GS3D) or `PDL::Graphics::TriD`. |
+| `examples/dump_nyhead19.pl` | Extract New York Head 19ch + fiducials from `sa_nyhead.mat` (`/sa/locs_3D_orig`) into `nyhead19.txt`; built-in fiducial sanity check. Needs `PDL::IO::HDF5` + the NY Head `.mat`. |
+| `examples/overlay_nyhead.pl` | Overlay `standard_1020.elc` onto NY Head 19ch via `read_elc`: raw residual + fiducial-frame-aligned residual (mm) + worst-channel, writes `electrodes_overlay.xyz`. `--selftest` validates the alignment math. |
+| `examples/show_overlay_3d.pl` | GS3D 3D overlay of the two electrode sets with per-electrode displacement segments (left labels from `.elc`, right/mid from NY, an L/R & A/P sanity check); `--obj` exports a Blender-ready `.obj`+`.mtl` (octahedron markers + materials). |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -206,17 +211,44 @@ perl -Ilib -MPDL -MPDL::EEG::IO::NihonKohden=block_extents -e '
 bundle (`.EEG/.21E/.LOG/.CN3/.PTN/.bam/…`) and what each carries, including
 where the system reference and per-segment display montage live.
 
+## Electrode positions & 3D (ASA `.elc`)
+
+`PDL::EEG::IO::ASA::read_elc` reads ASA electrode files (e.g. mne-python's
+`standard_1020.elc`) into a `(3,N)` coordinate piddle plus a name→xyz lookup and
+detected fiducials. Four optional examples build on it, covering single-montage
+3D display and coregistration against the New York Head forward model:
+
+```
+# view one montage in 3D (colour by hemisphere)
+perl -Ilib examples/show_electrodes_3d.pl --elc standard_1020.elc --backend gs3d
+
+# NY Head coregistration: dump 19ch from the .mat, overlay, then view / export
+perl -Ilib examples/dump_nyhead19.pl   sa_nyhead.mat nyhead19.txt
+perl -Ilib examples/overlay_nyhead.pl  --elc standard_1020.elc --ny nyhead19.txt
+perl -I<P:G:C>/lib examples/show_overlay_3d.pl --obj overlay.obj   # 3D + Blender .obj
+```
+
+`standard_1020.elc` and the NY Head 19ch are both MNI mm on the same axis
+convention, so their **raw (unaligned) residual is already small** (~5 mm mean,
+no channel above ~11 mm) — direct confirmation that the electrode correspondence
+is correct, with no fitting. `overlay_nyhead.pl --selftest` validates the
+fiducial-frame alignment independently (a known transform recovers to 0 mm). The
+3D tools need `PDL::Graphics::Cairo` (GS3D), and the NY Head dump needs
+`PDL::IO::HDF5`; the core `PDL::EEG::IO::ASA` reader needs only PDL.
+
 ## Tests
 
 ```
-make test        # 13 files (t/06 reserved/skipped), 285 subtests
+make test        # 14 files (t/06 reserved/skipped), 340 subtests
 ```
 
 `t/01_nihonkohden` `t/02_edf` `t/03_ptn` `t/04_signal` `t/05_montage`
 `t/06_reserved` (skip: reserved) `t/07_blocks` (block_extents + multi-segment
 extblock regression) `t/08_epoch` (event placement + wall-clock→sample mapping)
 `t/09_i18n` `t/10_besa_ascii` `t/11_edf_to_mul` `t/12_derivation`
-`t/13_edf_roundtrip` (µV round-trip incl. DC, per-signal EDF dimension).
+`t/13_edf_roundtrip` (µV round-trip incl. DC, per-signal EDF dimension)
+`t/14_asa` (ASA `.elc` reader: parse, fiducials, name lookup, Advent shim,
+against a 28-point real-coordinate fixture).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real
