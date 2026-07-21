@@ -41,6 +41,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/dump_nyhead19.pl` | Extract New York Head 19ch + fiducials from `sa_nyhead.mat` (`/sa/locs_3D_orig`) into `nyhead19.txt`; built-in fiducial sanity check. Needs `PDL::IO::HDF5` + the NY Head `.mat`. |
 | `examples/overlay_nyhead.pl` | Overlay `standard_1020.elc` onto NY Head 19ch via `read_elc`: raw residual + fiducial-frame-aligned residual (mm) + worst-channel, writes `electrodes_overlay.xyz`. `--selftest` validates the alignment math. |
 | `examples/show_overlay_3d.pl` | GS3D 3D overlay of the two electrode sets with per-electrode displacement segments (left labels from `.elc`, right/mid from NY, an L/R & A/P sanity check); `--obj` exports a Blender-ready `.obj`+`.mtl` (octahedron markers + materials). |
+| `examples/overlay_scalp_obj.pl` | Overlay `.elc` electrodes onto a NY Head **surface** and export one Blender/MeshLab `.obj`+`.mtl`. `--surf` selects the mesh (`/sa/head` scalp, `/sa/cortex75K` cortex); electrodes drop on unaligned (same MNI frame). Each electrode is its own named object with an optional outward-facing 3D **text label** (`--labels`/`--no-labels`) — an L/R check readable even in Finder preview. `--stats` reports electrode→nearest-vertex distance; `--selftest` needs no PDL or data. Needs `PDL::IO::HDF5` + the NY Head `.mat`. |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -215,7 +216,7 @@ where the system reference and per-segment display montage live.
 
 `PDL::EEG::IO::ASA::read_elc` reads ASA electrode files (e.g. mne-python's
 `standard_1020.elc`) into a `(3,N)` coordinate piddle plus a name→xyz lookup and
-detected fiducials. Four optional examples build on it, covering single-montage
+detected fiducials. Five optional examples build on it, covering single-montage
 3D display and coregistration against the New York Head forward model:
 
 ```
@@ -226,6 +227,12 @@ perl -Ilib examples/show_electrodes_3d.pl --elc standard_1020.elc --backend gs3d
 perl -Ilib examples/dump_nyhead19.pl   sa_nyhead.mat nyhead19.txt
 perl -Ilib examples/overlay_nyhead.pl  --elc standard_1020.elc --ny nyhead19.txt
 perl -I<P:G:C>/lib examples/show_overlay_3d.pl --obj overlay.obj   # 3D + Blender .obj
+
+# overlay electrodes on a NY Head surface (scalp or cortex) → Blender/MeshLab .obj
+perl -Ilib examples/overlay_scalp_obj.pl --elc standard_1020.elc \
+    --mat sa_nyhead.mat --surf /sa/head      --out nyhead_scalp.obj
+perl -Ilib examples/overlay_scalp_obj.pl --elc standard_1020.elc \
+    --mat sa_nyhead.mat --surf /sa/cortex75K --out nyhead_cortex.obj --no-stats
 ```
 
 `standard_1020.elc` and the NY Head 19ch are both MNI mm on the same axis
@@ -235,6 +242,15 @@ is correct, with no fitting. `overlay_nyhead.pl --selftest` validates the
 fiducial-frame alignment independently (a known transform recovers to 0 mm). The
 3D tools need `PDL::Graphics::Cairo` (GS3D), and the NY Head dump needs
 `PDL::IO::HDF5`; the core `PDL::EEG::IO::ASA` reader needs only PDL.
+
+`overlay_scalp_obj.pl` drops the electrodes straight onto a surface mesh
+(`<group>/vc`+`/tri`) with no alignment, so the mm offset you see is the true
+electrode-to-surface fit. In `sa_nyhead.mat` only `/sa/head` (1082 verts) and
+`/sa/cortex75K` (74 382 verts) carry vertices — the lower-resolution `cortexNK`
+groups are faces-only. Each electrode becomes its own named object carrying an
+outward-facing 3D text label (`--no-labels` to omit), so a left/right swap is
+obvious in any viewer, Finder Quick Look included. (h5ls reports these datasets
+transposed: `{3,N}` on disk is `(N,3)` in PDL.)
 
 ## Tests
 
