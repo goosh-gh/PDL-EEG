@@ -24,6 +24,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `PDL::EEG::IO::ASA` | `read_elc` — read ASA electrode-position files (`.elc`). Returns `coords [3,N]` (native unit, MNI mm), parallel `labels`, name→xyz `pos`, `unit`/`reference`, and auto-detected `fiducials` (LPA/RPA/Nz). Robust to indented blocks/CRLF; coordinates parsed vectorised. `parse_ELEC_POS3D_ASA_4AdventCalendar` is a drop-in shim for the PDL Advent Calendar 2024 (Day 12) parser. |
 | `PDL::EEG::Derivation` | `derive` (general linear derivation `y = M·x`), `bne` (balanced non-cephalic re-reference), `rereference` (single/linked/average). |
 | `PDL::EEG::Signal` | Device-independent square-pulse / TTL detector. |
+| `PDL::EEG::MAP2D` | `plot_topomap` — MNE-style round 2D scalp voltage map (head circle, nose, ears, colour bar) for one latency, from a voltage vector + an ASA `.elc`. Sphere-fit azimuthal-equidistant projection recentred on the scalp; thin-plate-spline interpolation clipped to the head disc. Renders with `PDL::Graphics::Cairo` (loaded on demand). |
 
 ## Command-line tools
 
@@ -42,6 +43,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/overlay_nyhead.pl` | Overlay `standard_1020.elc` onto NY Head 19ch via `read_elc`: raw residual + fiducial-frame-aligned residual (mm) + worst-channel, writes `electrodes_overlay.xyz`. `--selftest` validates the alignment math. |
 | `examples/show_overlay_3d.pl` | GS3D 3D overlay of the two electrode sets with per-electrode displacement segments (left labels from `.elc`, right/mid from NY, an L/R & A/P sanity check); `--obj` exports a Blender-ready `.obj`+`.mtl` (octahedron markers + materials). |
 | `examples/overlay_scalp_obj.pl` | Overlay `.elc` electrodes onto a NY Head **surface** and export one Blender/MeshLab `.obj`+`.mtl`. `--surf` selects the mesh (`/sa/head` scalp, `/sa/cortex75K` cortex); electrodes drop on unaligned (same MNI frame). Each electrode is its own named object with an optional outward-facing 3D **text label** (`--labels`/`--no-labels`) — an L/R check readable even in Finder preview. `--stats` reports electrode→nearest-vertex distance; `--selftest` needs no PDL or data. Needs `PDL::IO::HDF5` + the NY Head `.mat`. |
+| `examples/topomap_demo.pl` | Worked `plot_topomap` example: reads a montage `.elc`, builds a synthetic average, writes a topomap PNG. Needs `PDL::Graphics::Cairo`. |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -252,10 +254,48 @@ outward-facing 3D text label (`--no-labels` to omit), so a left/right swap is
 obvious in any viewer, Finder Quick Look included. (h5ls reports these datasets
 transposed: `{3,N}` on disk is `(N,3)` in PDL.)
 
+## Scalp topography (2D)
+
+`PDL::EEG::MAP2D::plot_topomap` draws an MNE-style circular scalp voltage map for
+one latency. Electrode positions come from an ASA `.elc` (read by
+`PDL::EEG::IO::ASA`); voltages are a per-channel vector, or `avg[chan,time]` plus
+`time`.
+
+​```perl
+use PDL::EEG::MAP2D qw(plot_topomap);
+
+plot_topomap(
+    avg     => $avg,                 # (n_ch, n_time); or values => <n_ch vector>
+    time    => $sample,
+    labels  => \@channel_names,      # row order of $avg
+    montage => 'standard_1020.elc',
+    clim    => 15,                   # ± µV (omit for auto, from scalp channels)
+    contours=> 6,
+    names   => 1,
+    title   => 'wp1 160 ms',
+    outfile => 'topo.png',           # or device => 'gs' for a giza-server window
+);
+​```
+
+The scalp sensors are sphere-fitted, projected by an azimuthal-equidistant map
+(nose up, right ear right), recentred on the scalp centroid, and interpolated
+with a thin-plate spline clipped to the head disc (which extends `overshoot` past
+the drawn head circle). Old 10-20 names `T3 T4 T5 T6` map to `T7 T8 P7 P8`;
+fiducials are skipped; periocular sensors (`/EOG/`, or any sensor below
+`periph_deg`, e.g. an aliased `X1`) are kept out of the sphere fit, scale and
+colour limits, and by default are drawn but not interpolated (`eog_interp => 1`
+includes them). Layout knobs: `margin` (sensor inset), `overshoot` (colour past
+the circle), `ear_dy` (ear height), `cbar_label_x` (colour-bar number position).
+Full options in `perldoc PDL::EEG::MAP2D`; worked example in
+`examples/topomap_demo.pl`.
+
+`PDL::Graphics::Cairo` is required only for rendering (loaded on demand);
+`project_positions` / `interpolate_topo` and `t/15_map2d.t` need only PDL.
+
 ## Tests
 
 ```
-make test        # 14 files (t/06 reserved/skipped), 340 subtests
+make test        # 15 files (t/06 reserved/skipped), 350 subtests
 ```
 
 `t/01_nihonkohden` `t/02_edf` `t/03_ptn` `t/04_signal` `t/05_montage`
@@ -265,6 +305,8 @@ extblock regression) `t/08_epoch` (event placement + wall-clock→sample mapping
 `t/13_edf_roundtrip` (µV round-trip incl. DC, per-signal EDF dimension)
 `t/14_asa` (ASA `.elc` reader: parse, fiducials, name lookup, Advent shim,
 against a 28-point real-coordinate fixture).
+`t/15_map2d` (MAP2D: azimuthal projection orientation, scalp recentering,
+thin-plate-spline grid; render-free, needs only PDL).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real
