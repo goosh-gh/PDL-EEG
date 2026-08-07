@@ -13,6 +13,7 @@ our $VERSION = '0.01';
 
 our @EXPORT_OK = qw(
     plot_topomap
+    plot_topomap_panels
     project_positions
     interpolate_topo
 );
@@ -44,6 +45,9 @@ my $PI = 4 * atan2(1, 1);
 my %ALIAS = (
     T3 => 'T7', T4 => 'T8', T5 => 'P7', T6 => 'P8',
     T7 => 'T3', T8 => 'T4', P7 => 'T5', P8 => 'T6',
+    # mastoid-reference aliases (redundant duplicates of the M1/M2 positions):
+    # some recordings label the mastoids lm/rm.  M1 = left (x<0), M2 = right.
+    LM => 'M1', RM => 'M2',
 );
 
 # ColorBrewer RdBu reversed: blue(low) -> white(0) -> red(high), 11 stops.
@@ -126,12 +130,14 @@ sub project_positions {
 # Thin-plate-spline scattered interpolation (internal)
 # ---------------------------------------------------------------------------
 sub _tps_solve {
-    my ($px, $py, $v) = @_;
+    my ($px, $py, $v, $lambda) = @_;
+    $lambda //= 0;                                  # 0 -> exact TPS (axial path)
     my $n  = $px->nelem;
     my $dx = $px->dummy(0) - $px->dummy(1);
     my $dy = $py->dummy(0) - $py->dummy(1);
     my $r2 = $dx*$dx + $dy*$dy;
     my $K  = 0.5 * $r2 * log($r2 + ($r2 == 0));    # U(r)=r^2 ln r ; diagonal -> 0
+    $K = $K + $lambda * identity($n) if $lambda;   # ridge: smooth through near-dups
 
     my $L = zeroes($n + 3, $n + 3);
     $L->slice("0:" . ($n-1) . ",0:" . ($n-1)) .= $K;
@@ -254,12 +260,13 @@ sub plot_topomap {
 
     # ---- match channels to sensor positions (with aliasing) ---------------
     my %extra_periph = map { uc($_) => 1 } @{ $a{periph} || [] };
-    my (@x, @y, @z, @val, @keep, @scalp);
+    my (@x, @y, @z, @val, @keep, @scalp, @nose);
     for my $i (0 .. $#$labels) {
         my $name = $labels->[$i];
         next if _is_fiducial($name);
+        my $al   = $ALIAS{uc $name};                  # alias lookup is case-insensitive
         my $key  = $mon->{pos}{$name}                 ? $name
-                 : ($ALIAS{$name} && $mon->{pos}{$ALIAS{$name}}) ? $ALIAS{$name}
+                 : ($al && $mon->{pos}{$al})          ? $al
                  : undef;
         unless (defined $key) {
             carp "plot_topomap: channel '$name' not in montage - skipped";
@@ -268,13 +275,25 @@ sub plot_topomap {
         my $p = $mon->{pos}{$key};
         push @x, $p->{x}; push @y, $p->{y}; push @z, $p->{z};
         push @val, $vals->at($i); push @keep, $name;
-        push @scalp, (_is_periph($name) || $extra_periph{uc $name}) ? 0 : 1;
+        # The nose tip and periocular (EOG) sensors are kept out of the head-circle
+        # geometry so their far-forward/-low positions can't distort the circle.
+        # The nose still feeds the field by default (its potential colours the map);
+        # EOG does not unless eog_interp.
+        my $is_nose = _is_nose($name);
+        push @scalp, ($is_nose || _is_periph($name) || $extra_periph{uc $name}) ? 0 : 1;
+        push @nose,  $is_nose ? 1 : 0;
     }
     croak "plot_topomap: no channels matched the montage" unless @keep;
     my $coords = cat(pdl(@x), pdl(@y), pdl(@z))->xchg(0, 1);   # (3,N)
     my $Vv     = pdl(@val);
     my $smask  = pdl(long, @scalp);
+    my $nmask  = pdl(long, @nose);
     my $N      = scalar @keep;
+
+    # ---- sagittal (orthographic side view): separate path, shares channels --
+    if (($a{orientation} // '') =~ /sag|lat/i) {
+        return _plot_sagittal(\%a, \@keep, $coords, $Vv, $nmask);
+    }
 
     # ---- project + interpolate -------------------------------------------
     my ($px, $py, $ref) = project_positions($coords,
@@ -288,9 +307,19 @@ sub plot_topomap {
     # plotted but excluded from the interpolation.  eog_interp => 1 lets the eye
     # channels feed the spline too (extends the frontal periphery - useful with a
     # broad montage such as the New York Head).
+    # Field reference (feeds interpolation AND clim), decoupled from the circle
+    # geometry: scalp sensors above the ear line ($ref) always; the nose tip joins
+    # by default (nose_interp => 0 to opt out) so its potential shapes the field
+    # and colour scale, though its position never sized the circle; EOG joins only
+    # with eog_interp.
+    my $incl_nose = defined $a{nose_interp} ? $a{nose_interp} : 1;
+    my $eogmask   = ($smask == 0) & ($nmask == 0);
+    my $fref = $ref->copy;
+    $fref = $fref | $nmask   if $incl_nose;
+    $fref = $fref | $eogmask if $a{eog_interp};
     my ($ipx, $ipy, $iv) = ($px, $py, $Vv);
-    unless ($a{eog_interp}) {
-        my $ri = which($ref);
+    {
+        my $ri = which($fref);
         ($ipx, $ipy, $iv) = ($px->index($ri), $py->index($ri), $Vv->index($ri))
             if $ri->nelem >= 3;
     }
@@ -303,7 +332,7 @@ sub plot_topomap {
         ($lo, $hi) = ref($a{clim}) ? @{ $a{clim} } : (-$a{clim}, $a{clim});
     }
     else {
-        my $ri  = which($ref);
+        my $ri  = which($fref);
         my $rv  = $ri->nelem ? $Vv->index($ri) : $Vv;
         my $m = $rv->abs->max; $m = 1e-6 if $m <= 0;
         ($lo, $hi) = (-$m, $m);
@@ -323,7 +352,10 @@ sub plot_topomap {
     # ---- figure / axes ----------------------------------------------------
     my $want_cbar = $a{colorbar} // 1;
     my ($fig, $ax, $cax);
-    if ($want_cbar) {
+    if ($a{_ax}) {                       # embedded in a composite: draw into given axes
+        $ax = $a{_ax}; $fig = $a{_fig}; $want_cbar = 0;
+    }
+    elsif ($want_cbar) {
         $fig = figure(width => ($a{width} // 640), height => ($a{height} // 600));
         my $gs = $fig->add_gridspec(1, 2, width_ratios => [20, 1],
             left => 0.02, right => 0.82, top => 0.92, bottom => 0.05, wspace => 0.25);
@@ -365,12 +397,19 @@ sub plot_topomap {
                  pdl(map { $d2p->($py->at($_)) } 0 .. $N-1),
                  color => $mark, s => ($a{sensor_size} // 9));
     if ($a{names}) {
+        my $fs = $a{name_size} // 10;
         for my $i (0 .. $N-1) {
-            $ax->text($d2p->($px->at($i)) + 3, $d2p->($py->at($i)) + 4,
-                $keep[$i], fontsize => ($a{name_size} // 10), color => 'black');
+            my $lx = $d2p->($px->at($i));
+            my $w  = 0.6 * $fs * length($keep[$i]);     # est. label width (px)
+            my $tx = ($lx + 3 + $w > $res) ? $lx - 3 - $w : $lx + 3;  # keep inside
+            $ax->text($tx, $d2p->($py->at($i)) + 4,
+                $keep[$i], fontsize => $fs, color => 'black');
         }
     }
-    $fig->suptitle($a{title}, fontsize => ($a{title_size} // 13)) if defined $a{title};
+    if ($a{_ax} && defined $a{title}) {
+        $ax->text($res*0.03, $res*0.97, $a{title}, ha=>"left", halign=>"left", va=>"top", valign=>"top", fontsize=>($a{title_size} // 12), color=>"black");
+    }
+    $fig->suptitle($a{title}, fontsize => ($a{title_size} // 13)) if !$a{_ax} && defined $a{title};
 
     # ---- colorbar ---------------------------------------------------------
     if ($want_cbar) {
@@ -389,13 +428,14 @@ sub plot_topomap {
         $cax->xlim(0, 1);
         my $xr = $a{cbar_label_x} // $a{xr} // 3.4;
         my %al = (ha => 'center', halign => 'center', va => 'center', valign => 'center');
-        $cax->text($xr, $nb - 1.5,     sprintf('%.1f', $hi), fontsize => 9, %al);
-        $cax->text($xr, ($nb - 1) / 2, '0',                  fontsize => 9, %al);
-        $cax->text($xr, 1.5,           sprintf('%.1f', $lo), fontsize => 9, %al);
-        $cax->set_title($a{unit} // 'uV', fontsize => 9);
+        $cax->text($xr, $nb - 1.5,     sprintf('%.1f', $hi), fontsize => ($a{cbar_size} // 9), %al);
+        $cax->text($xr, ($nb - 1) / 2, '0',                  fontsize => ($a{cbar_size} // 9), %al);
+        $cax->text($xr, 1.5,           sprintf('%.1f', $lo), fontsize => ($a{cbar_size} // 9), %al);
+        $cax->set_title($a{unit} // 'uV', fontsize => ($a{cbar_size} // 9));
     }
 
     # ---- output -----------------------------------------------------------
+    return ($lo, $hi) if $a{_ax};        # embedded: caller draws the shared colorbar
     $fig->save($a{outfile}) if $a{outfile};
 
     my $dev = lc($a{device} // $a{backend} // 'png');
@@ -410,6 +450,342 @@ sub plot_topomap {
     return $a{outfile} ? $a{outfile} : (wantarray ? ($fig, $ax) : $fig);
 }
 
+# --- sagittal (orthographic side view) -------------------------------------
+# Orthographic projection onto the mid-sagittal (Fz-Cz-Pz) plane: drop X, keep
+# (Y,Z).  Left view faces left  (screen_x = -Y, near hemisphere x<=0);
+# right view faces right (screen_x = +Y, near hemisphere x>=0).  This is the
+# axis-aligned case of a general orthographic view - the same family as
+# PDL::Transform::Cartography's t_orthographic, kept direct here because for a
+# fixed side the projection is exact and needs no lon/lat round-trip.
+
+# 2D convex hull (Andrew monotone chain) -> (hx, hy) piddles, CCW, open.
+sub _hull2d {
+    my ($x, $y) = @_;
+    my @p = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] }
+            map { [$x->at($_), $y->at($_)] } 0 .. $x->nelem - 1;
+    my $cr = sub { my ($o,$a,$b)=@_;
+        ($a->[0]-$o->[0])*($b->[1]-$o->[1]) - ($a->[1]-$o->[1])*($b->[0]-$o->[0]) };
+    my (@lo, @up);
+    for my $q (@p)         { pop @lo while @lo>=2 && $cr->($lo[-2],$lo[-1],$q)<=0; push @lo,$q }
+    for my $q (reverse @p) { pop @up while @up>=2 && $cr->($up[-2],$up[-1],$q)<=0; push @up,$q }
+    pop @lo; pop @up; my @h = (@lo, @up);
+    return (pdl(map { $_->[0] } @h), pdl(map { $_->[1] } @h));
+}
+
+# vectorized point-in-polygon (ray casting) for a flat grid (GX,GY) vs (hx,hy)
+sub _in_poly {
+    my ($GX, $GY, $hx, $hy) = @_;
+    my $n = $hx->nelem;
+    my $in = zeroes(long, $GX->nelem);
+    for (my $i = 0, my $j = $n - 1; $i < $n; $j = $i++) {
+        my ($xi,$yi,$xj,$yj) = ($hx->at($i),$hy->at($i),$hx->at($j),$hy->at($j));
+        my $cond = (($yi > $GY) != ($yj > $GY))
+                 & ($GX < ($xj-$xi)*($GY-$yi)/(($yj-$yi) || 1e-9) + $xi);
+        $in = $in->xor($cond);
+    }
+    return $in;
+}
+
+# Load a sagittal silhouette polyline: "Y Z" per line (montage frame, mm).
+sub _load_silhouette {
+    my ($file) = @_;
+    open my $fh, '<', $file or croak "plot_topomap: silhouette '$file': $!";
+    my (@Y, @Z);
+    while (<$fh>) { next if /^\s*#/ || /^\s*$/; my ($y,$z)=split; push @Y,$y; push @Z,$z; }
+    close $fh;
+    croak "plot_topomap: silhouette '$file' has < 3 points" if @Y < 3;
+    return (pdl(@Y), pdl(@Z));
+}
+
+sub _plot_sagittal {
+    my ($a, $keep, $coords, $Vv, $nmask) = @_;
+    my $view = ($a->{orientation} =~ /right/i) ? 'R'
+             : ($a->{orientation} =~ /left/i)  ? 'L'
+             : 'L';                                  # bare 'sagittal' -> left
+    my $sgn  = ($view eq 'R') ? 1 : -1;              # screen_x = sgn * Y
+    my $tol  = $a->{midline_tol} // 20;              # mm; keep midline in both views
+
+    my $X = $coords->slice("(0),"); my $Y = $coords->slice("(1),");
+    my $Z = $coords->slice("(2),");
+    my $near = ($view eq 'R') ? ($X >= -$tol) : ($X <= $tol);
+    my $ni   = which($near);
+    croak "plot_topomap: no sensors on the $view side" if $ni->nelem < 3;
+
+    my $px = ($sgn * $Y)->index($ni);
+    my $py = $Z->index($ni);
+    my $vv = $Vv->index($ni);
+    my @lab = map { $keep->[$_] } $ni->list;
+
+    # silhouette polygon (screen coords): from NYHead polyline if supplied,
+    # else a convex hull of the projected sensors, expanded a touch.
+    my ($hx, $hy);
+    if ($a->{silhouette}) {
+        my ($sY, $sZ) = _load_silhouette($a->{silhouette});
+        ($hx, $hy) = ($sgn * $sY, $sZ);
+    }
+    else {
+        my ($h0x, $h0y) = _hull2d($px, $py);
+        my ($cx, $cy)   = ($h0x->avg, $h0y->avg);
+        ($hx, $hy) = ($cx + ($h0x-$cx)*1.15, $cy + ($h0y-$cy)*1.15);
+    }
+
+    # Never clip a real sensor out of the map: a co-registered skin from a
+    # different head model (e.g. the idealized standard_1020 sphere vs the real
+    # NYHead scalp) can leave the top-midline sensors or the nose just outside
+    # the outline.  Grow the outline about its centroid just enough to enclose
+    # every sensor (+2% margin) - shape-preserving, so it stays a clean head
+    # profile instead of spiking out to each stray point.  fit_silhouette => 0
+    # to disable.
+    if (defined $a->{fit_silhouette} ? $a->{fit_silhouette} : 1) {
+        my $oi = which(!_in_poly($px, $py, $hx, $hy));
+        if ($oi->nelem) {
+            my ($ccx, $ccy) = ($hx->avg, $hy->avg);
+            my $s = 1.0;
+            for (1 .. 60) {
+                last unless which(!_in_poly($px, $py,
+                    $ccx+($hx-$ccx)*$s, $ccy+($hy-$ccy)*$s))->nelem;
+                $s += 0.02;
+            }
+            $s += 0.02;                              # small margin
+            carp sprintf "plot_topomap: silhouette too small for %d sensor(s) "
+                . "(%s); grew outline x%.2f to enclose them",
+                $oi->nelem, join(',', map { $lab[$_] } $oi->list), $s
+                if $s > 1.06;                        # quiet for tiny corrections
+            ($hx, $hy) = ($ccx+($hx-$ccx)*$s, $ccy+($hy-$ccy)*$s);
+        }
+    }
+
+    # square data window (equal aspect), grid, pixel mapping (mirrors axial)
+    my $res = $a->{res} // 240;
+    my ($x0,$x1) = ($hx->min, $hx->max);
+    my ($y0,$y1) = ($hy->min, $hy->max);
+    my $cx = ($x0+$x1)/2; my $cy = ($y0+$y1)/2;
+    my $H  = 0.5 * (($x1-$x0) > ($y1-$y0) ? ($x1-$x0) : ($y1-$y0)) * 1.08;  # +margin
+    ($x0,$x1,$y0,$y1) = ($cx-$H, $cx+$H, $cy-$H, $cy+$H);
+    my $span = 2*$H;
+    my $d2px = sub { (shift() - $x0)/$span * $res };
+    my $d2py = sub { (shift() - $y0)/$span * $res };
+
+    # boundary anchors on an outward-dilated ring (never on a sensor, so the TPS
+    # matrix can't go singular), IDW-valued from the sensors, then a lightly
+    # regularized TPS solve.
+    my $NB  = $a->{anchors} // 48;
+    my $nh  = $hx->nelem;
+    my ($ccx,$ccy) = ($hx->avg, $hy->avg);
+    my $ax_r = $ccx + ($hx-$ccx)*1.06;              # anchor ring: 6% outside outline
+    my $ay_r = $ccy + ($hy-$ccy)*1.06;
+    my (@ax,@ay,@av);
+    for my $k (0 .. $NB-1) {
+        my $t = $k/$NB*$nh; my $i = int($t); my $f = $t-$i; my $j = ($i+1)%$nh;
+        my $bx = $ax_r->at($i)*(1-$f)+$ax_r->at($j)*$f;
+        my $by = $ay_r->at($i)*(1-$f)+$ay_r->at($j)*$f;
+        my $w  = 1/(($px-$bx)**2+($py-$by)**2+1e-6);
+        push @ax,$bx; push @ay,$by; push @av, ($w*$vv)->sum/$w->sum;
+    }
+    my $fx = $px->append(pdl(@ax)); my $fy = $py->append(pdl(@ay));
+    my $fv = $vv->append(pdl(@av));
+    # ridge scaled to the coordinate size (mm); tiny, just to survive collinear/
+    # near-coincident sensors without visibly smoothing the map.
+    my $sc2 = (($fx->max-$fx->min)**2 + ($fy->max-$fy->min)**2) || 1;
+    my $c  = _tps_solve($fx, $fy, $fv, 1e-6 * $sc2);
+    my $nf = $fx->nelem;
+    my $w  = $c->slice("0:".($nf-1));
+    my ($a0,$a1,$a2) = ($c->at($nf),$c->at($nf+1),$c->at($nf+2));
+
+    my $gxl = (sequence($res)/($res-1))*$span + $x0;
+    my $gyl = (sequence($res)/($res-1))*$span + $y0;
+    my $GX = $gxl->dummy(1,$res)->flat; my $GY = $gyl->dummy(0,$res)->flat;
+    my $DX = $GX->dummy(1,$nf) - $fx->dummy(0,$GX->nelem);
+    my $DY = $GY->dummy(1,$nf) - $fy->dummy(0,$GY->nelem);
+    my $R2 = $DX*$DX + $DY*$DY; my $U = 0.5*$R2*log($R2+($R2==0));
+    my $F  = ($U*$w->dummy(0,$GX->nelem))->xchg(0,1)->sumover + $a0 + $a1*$GX + $a2*$GY;
+    my $field  = $F->reshape($res,$res);
+    my $inside = _in_poly($GX,$GY,$hx,$hy)->reshape($res,$res);
+
+    # colour limits from the projected sensors (nose included by projection)
+    my ($lo,$hi);
+    if (defined $a->{clim}) { ($lo,$hi) = ref($a->{clim}) ? @{$a->{clim}} : (-$a->{clim},$a->{clim}); }
+    else { my $m = $vv->abs->max; $m = 1e-6 if $m <= 0; ($lo,$hi) = (-$m,$m); }
+
+    my ($R,$G,$B) = _colorize($field,$lo,$hi);
+    my $out = !$inside;
+    $R->flat->where($out->flat) .= 1; $G->flat->where($out->flat) .= 1; $B->flat->where($out->flat) .= 1;
+    my $hwc = cat($R,$G,$B)->xchg(0,1);
+
+    # ---- figure / axes (colorbar layout mirrors the axial path) -----------
+    my $want_cbar = $a->{colorbar} // 1;
+    my ($fig,$ax,$cax);
+    if ($a->{_ax}) {                     # embedded in a composite
+        $ax = $a->{_ax}; $fig = $a->{_fig}; $want_cbar = 0;
+    }
+    elsif ($want_cbar) {
+        $fig = figure(width => ($a->{width} // 640), height => ($a->{height} // 600));
+        my $gs = $fig->add_gridspec(1,2, width_ratios=>[20,1],
+            left=>0.02, right=>0.82, top=>0.92, bottom=>0.05, wspace=>0.25);
+        $ax  = $fig->add_subplot($gs->at(0,0));
+        $cax = $fig->add_subplot($gs->at(0,1));
+    }
+    else {
+        ($fig,$ax) = PDL::Graphics::Cairo::subplots(1,1,
+            figsize => [ ($a->{width}//560)/100, ($a->{height}//600)/100 ]);
+    }
+    $ax->imshow($hwc, origin=>'lower');
+    $ax->set_aspect('equal'); $ax->axis('off');
+
+    my $ncont = $a->{contours} // 6;
+    if ($ncont) {
+        my $fm = $field->copy;
+        my $inmean = $field->flat->where($inside->flat)->avg;
+        $fm->flat->where($out->flat) .= $inmean;
+        my $gpix = sequence($res) + 0.5;
+        eval { $ax->contour($gpix,$gpix,$fm->xchg(0,1),
+                 levels=>$ncont, colors=>'black', lw=>0.6, vmin=>$lo, vmax=>$hi); 1 }
+            or carp "plot_topomap: contour skipped ($@)";
+    }
+
+    # silhouette outline (closed) in pixel coords
+    my $cxp = $hx->append($hx->slice("0:0")); my $cyp = $hy->append($hy->slice("0:0"));
+    $ax->line(pdl(map { $d2px->($cxp->at($_)) } 0..$cxp->nelem-1),
+              pdl(map { $d2py->($cyp->at($_)) } 0..$cyp->nelem-1),
+              color => ($a->{outline_color} // 'black'), lw => ($a->{outline_lw} // 1.4));
+
+    # sensors + labels
+    $ax->scatter(pdl(map { $d2px->($px->at($_)) } 0..$px->nelem-1),
+                 pdl(map { $d2py->($py->at($_)) } 0..$px->nelem-1),
+                 color => ($a->{sensor_color} // '#333333'), s => ($a->{sensor_size} // 9));
+    if ($a->{names}) {
+        my $fs = $a->{name_size} // 10;
+        for my $i (0 .. $#lab) {
+            my $lx = $d2px->($px->at($i));
+            my $w  = 0.6 * $fs * length($lab[$i]);
+            my $tx = ($lx + 3 + $w > $res) ? $lx - 3 - $w : $lx + 3;
+            $ax->text($tx, $d2py->($py->at($i))+4,
+                $lab[$i], fontsize => $fs, color => 'black');
+        }
+    }
+    my $ttl = $a->{title} // ($view eq 'R' ? 'sagittal (right)' : 'sagittal (left)');
+    if ($a->{_ax}) { $ax->text($res*0.03, $res*0.97, $ttl, ha=>"left", halign=>"left", va=>"top", valign=>"top", fontsize=>($a->{title_size} // 12), color=>"black") if defined $ttl; }
+    else { $fig->suptitle($ttl, fontsize => ($a->{title_size} // 13)) if defined $ttl; }
+
+    if ($want_cbar) {
+        my $nb = 64;
+        my $cf = (sequence($nb)/($nb-1))*($hi-$lo)+$lo;
+        my ($cr,$cg,$cb) = _colorize($cf->dummy(0,1),$lo,$hi);
+        my $bar = cat($cr,$cg,$cb)->xchg(0,1);
+        $cax->imshow($bar, origin=>'lower'); $cax->set_aspect('auto');
+        $cax->set_xticks(pdl([])); $cax->set_yticks(pdl([])); $cax->xlim(0,1);
+        my $xr = $a->{cbar_label_x} // 3.4;
+        my %al = (ha=>'center', halign=>'center', va=>'center', valign=>'center');
+        $cax->text($xr, $nb-1.5, sprintf('%.1f',$hi), fontsize=>($a->{cbar_size} // 9), %al);
+        $cax->text($xr, ($nb-1)/2, '0', fontsize=>($a->{cbar_size} // 9), %al);
+        $cax->text($xr, 1.5, sprintf('%.1f',$lo), fontsize=>($a->{cbar_size} // 9), %al);
+        $cax->set_title($a->{unit} // 'uV', fontsize=>($a->{cbar_size} // 9));
+    }
+
+    return ($lo, $hi) if $a->{_ax};      # embedded: caller draws the shared colorbar
+    $fig->save($a->{outfile}) if $a->{outfile};
+    my $dev = lc($a->{device} // $a->{backend} // 'png');
+    if ($dev ne 'png') {
+        my %map = (osx=>'gs',aqua=>'gs',cocoa=>'gs',gs=>'gs',giza=>'gs',
+                   gnuplot=>'gnuplot',qt=>'gnuplot',x11=>'gnuplot');
+        $fig->show(backend => ($map{$dev} // $dev));
+    }
+    return $a->{outfile} ? $a->{outfile} : (wantarray ? ($fig,$ax) : $fig);
+}
+
+# --- composite panels (e.g. sagittal-left | axial | sagittal-right) ---------
+# One figure, several views sharing a single colour scale and colorbar.  Each
+# view is drawn by plot_topomap into a supplied axes (the _ax/_fig hook).
+sub _resolve_vals {
+    my $a = shift;
+    if (defined $a->{values}) {
+        return (ref($a->{values}) && eval { $a->{values}->isa('PDL') })
+            ? $a->{values}->flat : pdl(@{ $a->{values} });
+    }
+    elsif (defined $a->{avg}) {
+        my $t = $a->{time} // croak "plot_topomap_panels: 'time' needed with 'avg'";
+        return (ref($a->{avg}) && eval { $a->{avg}->isa('PDL') })
+            ? $a->{avg}->slice(":,($t)")->flat
+            : pdl(map { $_->[$t] } @{ $a->{avg} });
+    }
+    croak "plot_topomap_panels: supply 'values' or 'avg'+'time'";
+}
+
+sub plot_topomap_panels {
+    my %a = @_;
+    require PDL::Graphics::Cairo;
+    PDL::Graphics::Cairo->import(qw(figure));
+
+    my $views = $a{views} || ['sagittal-left', 'axial', 'sagittal-right'];
+    my $n     = scalar @$views;
+
+    # one shared, symmetric colour scale (default: scalp + nose, minus EOG/fids)
+    my $clim = $a{clim};
+    unless (defined $clim) {
+        my $vv = _resolve_vals(\%a);
+        my @use;
+        for my $i (0 .. $#{ $a{labels} }) {
+            my $nm = $a{labels}[$i];
+            next if _is_fiducial($nm) || _is_periph($nm);
+            push @use, $vv->at($i);
+        }
+        my $m = @use ? pdl(@use)->abs->max : 1; $m = 1e-6 if $m <= 0;
+        $clim = [-$m, $m];
+    }
+    $clim = [-$clim, $clim] unless ref $clim;
+    my ($lo, $hi) = @$clim;
+
+    my $fig = figure(width  => ($a{width}  // 300*$n + 90),
+                     height => ($a{height} // 380));
+    my $gs  = $fig->add_gridspec(1, $n+1, width_ratios => [ (10) x $n, 1 ],
+        left => 0.02, right => 0.9, top => 0.86, bottom => 0.04, wspace => 0.18);
+
+    my %common = %a;
+    delete @common{qw(views orientation title titles outfile colorbar
+                      width height clim unit cbar_label_x device backend)};
+    # maps are packed ~1/n the size, so shrink the per-panel fonts by default
+    # (still overridable by passing name_size / title_size explicitly).
+    $common{name_size}  //= 7;
+    $common{title_size} //= 10;
+
+    for my $c (0 .. $n-1) {
+        my $view = $views->[$c];
+        my $pax  = $fig->add_subplot($gs->at(0, $c));
+        my $pt   = $a{titles} ? $a{titles}[$c]
+                 : $view =~ /axial/i ? 'axial'
+                 : $view =~ /right/i ? 'right'
+                 : $view =~ /left/i  ? 'left' : $view;
+        plot_topomap(%common, orientation => $view, clim => $clim,
+                     _ax => $pax, _fig => $fig, colorbar => 0, title => $pt);
+    }
+
+    # shared colorbar
+    my $cax = $fig->add_subplot($gs->at(0, $n));
+    my $nb  = 64;
+    my $cf  = (sequence($nb)/($nb-1))*($hi-$lo) + $lo;
+    my ($cr,$cg,$cb) = _colorize($cf->dummy(0,1), $lo, $hi);
+    $cax->imshow(cat($cr,$cg,$cb)->xchg(0,1), origin => 'lower');
+    $cax->set_aspect('auto'); $cax->set_xticks(pdl([])); $cax->set_yticks(pdl([]));
+    $cax->xlim(0,1);
+    my $xr = $a{cbar_label_x} // 3.4;
+    my %al = (ha=>'center', halign=>'center', va=>'center', valign=>'center');
+    $cax->text($xr, $nb-1.5,     sprintf('%.1f',$hi), fontsize=>($a{cbar_size} // 9), %al);
+    $cax->text($xr, ($nb-1)/2,   '0',                 fontsize=>($a{cbar_size} // 9), %al);
+    $cax->text($xr, 1.5,         sprintf('%.1f',$lo), fontsize=>($a{cbar_size} // 9), %al);
+    $cax->set_title($a{unit} // 'uV', fontsize=>($a{cbar_size} // 9));
+
+    $fig->suptitle($a{title}, fontsize => ($a{title_size} // 13)) if defined $a{title};
+    $fig->save($a{outfile}) if $a{outfile};
+
+    my $dev = lc($a{device} // $a{backend} // 'png');
+    if ($dev ne 'png') {
+        my %map = (osx=>'gs', aqua=>'gs', cocoa=>'gs', gs=>'gs', giza=>'gs',
+                   gnuplot=>'gnuplot', qt=>'gnuplot', x11=>'gnuplot');
+        $fig->show(backend => ($map{$dev} // $dev));
+    }
+    return $a{outfile} ? $a{outfile} : $fig;
+}
+
 # --- classifiers -----------------------------------------------------------
 sub _is_fiducial {
     my $n = shift;
@@ -419,6 +795,10 @@ sub _is_fiducial {
 sub _is_periph {
     my $n = shift;   # periocular / EOG sensors sit well below the scalp
     return $n =~ /EOG|^(?:IO|SO|LO|IO[12]|SO[12]|LO[12])$/i ? 1 : 0;
+}
+sub _is_nose {
+    my $n = shift;   # nose-tip electrode (ERP nose reference); not the Nz fiducial
+    return $n =~ /^nose$/i ? 1 : 0;
 }
 
 # head circle + nose + ears in pixel coords

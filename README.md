@@ -24,8 +24,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `PDL::EEG::IO::ASA` | `read_elc` — read ASA electrode-position files (`.elc`). Returns `coords [3,N]` (native unit, MNI mm), parallel `labels`, name→xyz `pos`, `unit`/`reference`, and auto-detected `fiducials` (LPA/RPA/Nz). Robust to indented blocks/CRLF; coordinates parsed vectorised. `parse_ELEC_POS3D_ASA_4AdventCalendar` is a drop-in shim for the PDL Advent Calendar 2024 (Day 12) parser. |
 | `PDL::EEG::Derivation` | `derive` (general linear derivation `y = M·x`), `bne` (balanced non-cephalic re-reference), `rereference` (single/linked/average). |
 | `PDL::EEG::Signal` | Device-independent square-pulse / TTL detector. |
-| `PDL::EEG::MAP2D` | `plot_topomap` — MNE-style round 2D scalp voltage map (head circle, nose, ears, colour bar) for one latency, from a voltage vector + an ASA `.elc`. Sphere-fit azimuthal-equidistant projection recentred on the scalp; thin-plate-spline interpolation clipped to the head disc. Renders with `PDL::Graphics::Cairo` (loaded on demand). |
-
+| `PDL::EEG::MAP2D` | `plot_topomap` — 2D scalp voltage map for one latency from a voltage vector + an ASA `.elc`. `orientation` selects the round **axial** map (sphere-fit azimuthal-equidistant, nose up, thin-plate-spline clipped to the head disc) or a **sagittal** side view (`sagittal-left` / `sagittal-right`, orthographic projection through the Fz-Cz-Pz plane, thin-plate-spline clipped to a head-profile silhouette). `plot_topomap_panels` draws several views in one figure on a shared colour scale. Renders with `PDL::Graphics::Cairo` (loaded on demand). |
 ## Command-line tools
 
 | Tool | Role |
@@ -44,6 +43,8 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/show_overlay_3d.pl` | GS3D 3D overlay of the two electrode sets with per-electrode displacement segments (left labels from `.elc`, right/mid from NY, an L/R & A/P sanity check); `--obj` exports a Blender-ready `.obj`+`.mtl` (octahedron markers + materials). |
 | `examples/overlay_scalp_obj.pl` | Overlay `.elc` electrodes onto a NY Head **surface** and export one Blender/MeshLab `.obj`+`.mtl`. `--surf` selects the mesh (`/sa/head` scalp, `/sa/cortex75K` cortex); electrodes drop on unaligned (same MNI frame). Each electrode is its own named object with an optional outward-facing 3D **text label** (`--labels`/`--no-labels`) — an L/R check readable even in Finder preview. `--stats` reports electrode→nearest-vertex distance; `--selftest` needs no PDL or data. Needs `PDL::IO::HDF5` + the NY Head `.mat`. |
 | `examples/topomap_demo.pl` | Worked `plot_topomap` example: reads a montage `.elc`, builds a synthetic average, writes a topomap PNG. Needs `PDL::Graphics::Cairo`. |
+| `examples/nose_from_nyhead.pl` | Extract the nose-tip vertex from the New York Head skin surface (via `PDL::IO::NYHead`), co-register it to a montage frame over the shared 10-20 electrodes, and print an ASA `.elc` position line for a `nose` electrode. |
+| `examples/silhouette_from_nyhead.pl` | Extract the mid-sagittal head-profile silhouette from the New York Head skin surface, co-register it to a montage frame, and write a `Y Z` polyline (`.poly`) for the sagittal views of `plot_topomap`. |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -256,41 +257,97 @@ transposed: `{3,N}` on disk is `(N,3)` in PDL.)
 
 ## Scalp topography (2D)
 
-`PDL::EEG::MAP2D::plot_topomap` draws an MNE-style circular scalp voltage map for
-one latency. Electrode positions come from an ASA `.elc` (read by
-`PDL::EEG::IO::ASA`); voltages are a per-channel vector, or `avg[chan,time]` plus
-`time`.
+`PDL::EEG::MAP2D::plot_topomap` draws a scalp voltage map for one latency.
+Electrode positions come from an ASA `.elc` (read by `PDL::EEG::IO::ASA`);
+voltages are a per-channel vector, or `avg[chan,time]` plus `time`.
 
-​```perl
-use PDL::EEG::MAP2D qw(plot_topomap);
+```perl
+use PDL::EEG::MAP2D qw(plot_topomap plot_topomap_panels);
 
 plot_topomap(
     avg     => $avg,                 # (n_ch, n_time); or values => <n_ch vector>
     time    => $sample,
     labels  => \@channel_names,      # row order of $avg
-    montage => 'standard_1020.elc',
+    montage => 'standard_1020_eog_nose.elc',
     clim    => 15,                   # ± µV (omit for auto, from scalp channels)
     contours=> 6,
     names   => 1,
     title   => 'wp1 160 ms',
     outfile => 'topo.png',           # or device => 'gs' for a giza-server window
 );
-​```
+```
 
-The scalp sensors are sphere-fitted, projected by an azimuthal-equidistant map
-(nose up, right ear right), recentred on the scalp centroid, and interpolated
-with a thin-plate spline clipped to the head disc (which extends `overshoot` past
-the drawn head circle). Old 10-20 names `T3 T4 T5 T6` map to `T7 T8 P7 P8`;
-fiducials are skipped; periocular sensors (`/EOG/`, or any sensor below
-`periph_deg`, e.g. an aliased `X1`) are kept out of the sphere fit, scale and
-colour limits, and by default are drawn but not interpolated (`eog_interp => 1`
-includes them). Layout knobs: `margin` (sensor inset), `overshoot` (colour past
-the circle), `ear_dy` (ear height), `cbar_label_x` (colour-bar number position).
-Full options in `perldoc PDL::EEG::MAP2D`; worked example in
-`examples/topomap_demo.pl`.
+### Axial (round) map — `orientation => 'axial'` (default)
+
+Scalp sensors are sphere-fitted, projected by an azimuthal-equidistant map (nose
+up, right ear right), recentred on the scalp centroid, and interpolated with a
+thin-plate spline clipped to the head disc (which extends `overshoot` past the
+drawn head circle). Old 10-20 names `T3 T4 T5 T6` map to `T7 T8 P7 P8`;
+`LM`/`RM` map to `M1`/`M2` (alias lookup is case-insensitive, so `lm`/`rm`/`t3`
+resolve too); fiducials are skipped. Periocular sensors (`/EOG/`, or any sensor
+below `periph_deg`, e.g. an aliased `X1`) are kept out of the sphere fit, scale
+and colour limits, and by default are drawn but not interpolated
+(`eog_interp => 1` includes them). A `nose` electrode is kept out of the head-
+circle geometry (so its far-forward position can't distort the circle) but its
+value feeds the colour scale and interpolation by default (`nose_interp => 0`
+draws it without letting it colour the map). Layout knobs: `margin` (sensor
+inset), `overshoot` (colour past the circle), `ear_dy` (ear height).
+
+### Sagittal (side) view — `orientation => 'sagittal-left'` / `'sagittal-right'`
+
+An orthographic projection onto the mid-sagittal (Fz-Cz-Pz) plane. The left view
+faces left (Fp1 at screen-left, left hemisphere shown); the right view faces
+right (Fp2 at screen-right, right hemisphere shown) — the far hemisphere is
+dropped. `nose`, mastoid (`lm`/`rm`) and EOG channels project onto the profile
+and take part like any near-side sensor. The head outline is a side-profile
+silhouette supplied as a polyline via `silhouette => 'file.poly'` (one `Y Z`
+pair per line, montage frame, mm — produced by
+`examples/silhouette_from_nyhead.pl`); without one, a convex hull of the
+projected sensors is used. Whatever the silhouette, it is grown just enough to
+enclose every projected sensor so no electrode falls outside the coloured region
+(`fit_silhouette => 0` disables this). `midline_tol` sets how far off the
+midline a sensor may sit and still appear in both views.
+
+### Several views in one figure — `plot_topomap_panels`
+
+```perl
+plot_topomap_panels(
+    avg     => $avg, time => $sample, labels => \@channel_names,
+    montage => 'standard_1020_eog_nose.elc',
+    silhouette => 'sagittal_silhouette.poly',
+    clim    => 15,
+    names   => 1,
+    title   => 'wp1 160 ms',
+    outfile => 'panels.png',         # or device => 'gs'
+);
+```
+
+Draws the views in `views` (default `['sagittal-left','axial','sagittal-right']`)
+side by side on one shared, symmetric colour scale with a single colour bar.
+Per-panel labels come from `titles` (default `left` / `axial` / `right`); the
+overall `title` is the figure heading. Per-panel fonts are smaller than the
+single-map defaults because the maps are packed.
+
+### Text and colour-bar knobs
+
+`names => 1` labels the sensors; `name_size` (default 10) sizes those labels,
+`title_size` the titles (12 for panel labels, 13 for the figure heading),
+`cbar_size` (default 9) the colour-bar numbers. A label that would overrun the
+right edge is placed to the left of its marker instead, so far-lateral names
+(`A2`, `rm`, `M2`) stay clear of the colour bar. `cbar_label_x` shifts the
+colour-bar numbers, `unit` sets the colour-bar caption (default `uV`).
+
+### Output
+
+`outfile` writes a PNG (the default `device`). `device => 'gs'` (aliases `osx`,
+`aqua`, `cocoa`, `giza`) opens a giza-server window; `device => 'gnuplot'`
+(aliases `qt`, `x11`) uses the gnuplot backend. With `outfile` set the call
+returns the filename; otherwise it returns the figure.
 
 `PDL::Graphics::Cairo` is required only for rendering (loaded on demand);
-`project_positions` / `interpolate_topo` and `t/15_map2d.t` need only PDL.
+`project_positions` / `interpolate_topo` and `t/15_map2d.t` need only PDL. Full
+options in `perldoc PDL::EEG::MAP2D`; worked example in
+`examples/topomap_demo.pl`.
 
 ## Tests
 
