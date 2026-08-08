@@ -25,6 +25,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `PDL::EEG::Derivation` | `derive` (general linear derivation `y = M·x`), `bne` (balanced non-cephalic re-reference), `rereference` (single/linked/average). |
 | `PDL::EEG::Signal` | Device-independent square-pulse / TTL detector. |
 | `PDL::EEG::MAP2D` | `plot_topomap` — 2D scalp voltage map for one latency from a voltage vector + an ASA `.elc`. `orientation` selects the round **axial** map (sphere-fit azimuthal-equidistant, nose up, thin-plate-spline clipped to the head disc) or a **sagittal** side view (`sagittal-left` / `sagittal-right`, orthographic projection through the Fz-Cz-Pz plane, thin-plate-spline clipped to a head-profile silhouette). `plot_topomap_panels` draws several views in one figure on a shared colour scale. Renders with `PDL::Graphics::Cairo` (loaded on demand). |
+| `PDL::EEG::TFA` | Continuous complex-Morlet time-frequency analysis (CWT), with frequency-domain convolution via `PDL::FFT` (no external wavelet dependency). `tfr_morlet`'s `output` gives total power, inter-trial coherence, or an exact phase-locked (`evoked`) / non-phase-locked (`induced`) power split (`power = evoked + induced`); `tfr_superlet` is the adaptive multiplicative superlet for short HFO bursts; `tfr_stat` is the across-trial reliability `z = mean/SEM`; `apply_baseline` normalises per frequency (`zscore`/`ratio`/`logratio`/`percent`/`mean`). |
 ## Command-line tools
 
 | Tool | Role |
@@ -45,6 +46,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/topomap_demo.pl` | Worked `plot_topomap` example: reads a montage `.elc`, builds a synthetic average, writes a topomap PNG. Needs `PDL::Graphics::Cairo`. |
 | `examples/nose_from_nyhead.pl` | Extract the nose-tip vertex from the New York Head skin surface (via `PDL::IO::NYHead`), co-register it to a montage frame over the shared 10-20 electrodes, and print an ASA `.elc` position line for a `nose` electrode. |
 | `examples/silhouette_from_nyhead.pl` | Extract the mid-sagittal head-profile silhouette from the New York Head skin surface, co-register it to a montage frame, and write a `Y Z` polyline (`.poly`) for the sagittal views of `plot_topomap`. |
+| `examples/sep_hfo_tfa.pl` | SEP high-frequency-oscillation time-frequency map. Reads EEGLAB `.set`+`.fdt` with BIDS sidecars (`_eeg.json`/`_channels.tsv`/`_events.tsv`; a v7.3 HDF5 `.set` via `PDL::IO::HDF5`), concatenates runs, epochs around the stimulus, auto-picks the contralateral central channel, runs the Morlet (or `--superlet`) transform, and renders with `PDL::Graphics::Cairo`. Views: `--itc`, `--stat`, `--decomp` (total/evoked/induced), `--sig` contours; `--excise <ms>` removes the stimulus artifact in-data; `--bl-min/--bl-max`, `--ymin/--ymax`, `--ytick/--xtick`, `--cmap`; `--demo` runs on synthetic data. Needs `PDL::Graphics::Cairo` to render. |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -349,10 +351,63 @@ returns the filename; otherwise it returns the figure.
 options in `perldoc PDL::EEG::MAP2D`; worked example in
 `examples/topomap_demo.pl`.
 
+## Time-frequency analysis (HFO)
+
+`PDL::EEG::TFA` is a renderer- and IO-independent time-frequency engine: a
+complex Morlet continuous wavelet transform whose convolution is done in the
+frequency domain via `PDL::FFT`, so there is no external wavelet dependency. It
+was built for somatosensory-evoked high-frequency oscillations, but nothing in
+it is HFO-specific.
+
+```perl
+use PDL::EEG::TFA qw(tfr_morlet apply_baseline);
+
+# $epochs (nepoch, ntime) real; $sfreq Hz; $times seconds
+my $freqs = 70 + 5 * sequence(167);                    # 70..900 Hz
+my $power = tfr_morlet($epochs, $sfreq, $freqs, n_cycles => 7);
+my $z     = apply_baseline($power, $times, [-0.05, -0.004], mode => 'zscore');
+```
+
+`tfr_morlet`'s `output` selects the total power (default, mean `|coef|^2`),
+inter-trial coherence (`itc`), the phase-locked evoked power (`evoked`,
+`|mean coef|^2`), or the non-phase-locked induced power (`induced`,
+`total - evoked`); the split is exact. `n_cycles` is a scalar or a per-frequency
+piddle (a ramped-cycle grid suits a wide band). `tfr_superlet` is the adaptive
+multiplicative superlet, which concentrates short high-frequency bursts more
+sharply in both time and frequency. `tfr_stat` returns the across-trial
+reliability `z = mean / SEM`, computed streaming (no per-trial storage) and
+distinct from the temporal-baseline z of `apply_baseline` — with many trials it
+is approximately Gaussian. `apply_baseline` normalises each frequency against a
+baseline window (`zscore`, `ratio`, `logratio`, `percent`, `mean`).
+
+### Worked example — `examples/sep_hfo_tfa.pl`
+
+Reads EEGLAB SEP data in the BIDS layout (a continuous `.set` with a companion
+`.fdt`, plus `_eeg.json` / `_channels.tsv` / `_events.tsv`; a v7.3 HDF5 `.set`
+is read via `PDL::IO::HDF5` when there is no `.fdt`), concatenates runs, epochs
+around the stimulus, auto-picks the contralateral central channel, runs the
+transform, z-scores against the pre-stimulus baseline, and renders the heatmap.
+
+```
+perl -Ilib examples/sep_hfo_tfa.pl RUN1_eeg.set RUN2_eeg.set -o hfo.png
+perl -Ilib examples/sep_hfo_tfa.pl --demo -o hfo_demo.png       # no data needed
+```
+
+Views: `--superlet` (superlet power), `--itc` (inter-trial coherence), `--stat`
+(across-trial reliability z), `--decomp` (three panels total / evoked / induced
+on a diverging, 0-centred, displayed-band scale). `--sig "5,10"` overlays
+significance contours at those `|z|` levels (for `--itc`, use 0–1 levels such as
+`"0.1,0.2"`). Artifact and baseline control: `--excise <ms>` interpolates the
+stimulus artifact in the data before the transform (so the wavelet cannot spread
+it into neighbouring latencies), and `--bl-min`/`--bl-max` set the baseline
+window. Display: `--ymin`/`--ymax`, `--ytick`/`--xtick`, `--cmap`.
+`PDL::Graphics::Cairo` is required only for rendering (loaded on demand); the
+engine and `t/16_tfa.t` need only PDL.
+
 ## Tests
 
 ```
-make test        # 15 files (t/06 reserved/skipped), 350 subtests
+make test        # 16 files (t/06 reserved/skipped), 376 subtests
 ```
 
 `t/01_nihonkohden` `t/02_edf` `t/03_ptn` `t/04_signal` `t/05_montage`
@@ -364,6 +419,9 @@ extblock regression) `t/08_epoch` (event placement + wall-clock→sample mapping
 against a 28-point real-coordinate fixture).
 `t/15_map2d` (MAP2D: azimuthal projection orientation, scalp recentering,
 thin-plate-spline grid; render-free, needs only PDL).
+`t/16_tfa` (TFA: Morlet wavelet energy, tone/burst localisation, ITC, baseline
+modes, superlet, across-trial reliability, evoked/induced decomposition;
+render-free, needs only PDL).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real
