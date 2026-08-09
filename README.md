@@ -26,6 +26,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `PDL::EEG::Signal` | Device-independent square-pulse / TTL detector. |
 | `PDL::EEG::MAP2D` | `plot_topomap` — 2D scalp voltage map for one latency from a voltage vector + an ASA `.elc`. `orientation` selects the round **axial** map (sphere-fit azimuthal-equidistant, nose up, thin-plate-spline clipped to the head disc) or a **sagittal** side view (`sagittal-left` / `sagittal-right`, orthographic projection through the Fz-Cz-Pz plane, thin-plate-spline clipped to a head-profile silhouette). `plot_topomap_panels` draws several views in one figure on a shared colour scale. Renders with `PDL::Graphics::Cairo` (loaded on demand). |
 | `PDL::EEG::TFA` | Continuous complex-Morlet time-frequency analysis (CWT), with frequency-domain convolution via `PDL::FFT` (no external wavelet dependency). `tfr_morlet`'s `output` gives total power, inter-trial coherence, or an exact phase-locked (`evoked`) / non-phase-locked (`induced`) power split (`power = evoked + induced`); `tfr_superlet` is the adaptive multiplicative superlet for short HFO bursts; `tfr_stat` is the across-trial reliability `z = mean/SEM`; `apply_baseline` normalises per frequency (`zscore`/`ratio`/`logratio`/`percent`/`mean`). |
+| `PDL::EEG::Inverse::MinimumNorm` | L2 minimum-norm distributed source localization on a surface-normal-constrained leadfield (New York Head `V_fem_normal`, or any leadfield of the same shape). `inverse_operator`/`apply_inverse`/`source_estimate`/`source_power` build one data-independent inverse operator and apply it; `method` selects **MNE**, **sLORETA**, or **eLORETA** (same operator, different per-source standardization), `ref` is average (CAR, default — a symmetric-PSD pseudoinverse handles the rank-deficient Gram) or `none`, regularization is `reg_frac`/`alpha`, eLORETA takes `max_iter`/`tol`. `forward_project` is `b = K j`; `avg_reference` re-references an electrode subset for montage studies. `source_power` returns the standardized (dimensionless) source statistic. Pure PDL + `PDL::MatrixOps`; the real leadfield loads via `PDL::IO::NYHead`. |
 ## Command-line tools
 
 | Tool | Role |
@@ -47,6 +48,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/nose_from_nyhead.pl` | Extract the nose-tip vertex from the New York Head skin surface (via `PDL::IO::NYHead`), co-register it to a montage frame over the shared 10-20 electrodes, and print an ASA `.elc` position line for a `nose` electrode. |
 | `examples/silhouette_from_nyhead.pl` | Extract the mid-sagittal head-profile silhouette from the New York Head skin surface, co-register it to a montage frame, and write a `Y Z` polyline (`.poly`) for the sagittal views of `plot_topomap`. |
 | `examples/sep_hfo_tfa.pl` | SEP high-frequency-oscillation time-frequency map. Reads EEGLAB `.set`+`.fdt` with BIDS sidecars (`_eeg.json`/`_channels.tsv`/`_events.tsv`; a v7.3 HDF5 `.set` via `PDL::IO::HDF5`), concatenates runs, epochs around the stimulus, auto-picks the contralateral central channel, runs the Morlet (or `--superlet`) transform, and renders with `PDL::Graphics::Cairo`. Views: `--itc`, `--stat`, `--decomp` (total/evoked/induced), `--sig` contours; `--excise <ms>` removes the stimulus artifact in-data; `--bl-min/--bl-max`, `--ymin/--ymax`, `--ytick/--xtick`, `--cmap`; `--demo` runs on synthetic data. Needs `PDL::Graphics::Cairo` to render. |
+| `examples/nyhead_inverse.pl` | New York Head source-localization demo / montage study: seed a cortical source → forward `b = K j` → sLORETA/eLORETA inverse → peak vertex + distance-to-seed (mm) + Harvard–Oxford area. `--demo` runs on a synthetic leadfield (no `.mat`); `--mat sa_nyhead.mat` uses the real leadfield via `PDL::IO::NYHead`. Flags: `--method`, `--ref`, `--snr <dB>`, `--alpha`/`--reg-frac`, `--seed`/`--seed-area`, `--montage`, `--out powers.dat` (the `Ns`-row source power in cortex75K vertex order, for the GS3D cortical overlay). |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -404,10 +406,79 @@ window. Display: `--ymin`/`--ymax`, `--ytick`/`--xtick`, `--cmap`.
 `PDL::Graphics::Cairo` is required only for rendering (loaded on demand); the
 engine and `t/16_tfa.t` need only PDL.
 
+## Distributed source localization (inverse)
+
+`PDL::EEG::Inverse::MinimumNorm` solves the EEG inverse problem on a
+surface-normal-constrained leadfield (built for the New York Head bundled
+leadfield `V_fem_normal`, but takes any leadfield of the same shape). It is the
+L2 minimum-norm family: MNE, sLORETA and eLORETA share **one** data-independent
+inverse operator and differ only in how each source row is standardized. Pure
+PDL — depends on PDL core and `PDL::MatrixOps` only (no `PDL::LinearAlgebra` /
+LAPACK). The real New York Head leadfield is loaded through `PDL::IO::NYHead`.
+
+The leadfield is stored `(Ns, Ne)` = (source, electrode); the New York Head
+`leadfield()` returns `(Ne, Ns)`, so pass `->transpose`. Every entry point
+asserts `Ns > Ne` and rejects a transposed leadfield. The signal model is
+`b = K j`.
+
+```perl
+use PDL::EEG::Inverse::MinimumNorm
+    qw(inverse_operator apply_inverse source_power);
+
+# one-shot: leadfield K (Ns,Ne) + scalp topography b (Ne) -> source power (Ns)
+my $op = inverse_operator($K, method => 'eloreta', ref => 'car');
+my $pw = source_power($op, $b);
+
+# reuse the operator across many time points (b as (Ne,Nt))
+my $J  = apply_inverse($op, $b);        # (Ns,Nt)
+```
+
+`inverse_operator` options: `method => 'mne'|'sloreta'|'eloreta'`, `ref =>
+'car'` (default) `| 'none'`, `reg_frac => 0.05` (Tikhonov `α =
+reg_frac·trace(KKᵀ)/Ne`) or an explicit `alpha`, and for eLORETA `max_iter =>
+100`, `tol => 1e-10`. `source_power` returns the standardized source power (the
+sLORETA/eLORETA statistic) — a dimensionless localization quantity, not a
+physical current density.
+
+An average-referenced leadfield has `1ᵀK = 0`, so the Gram `C = KKᵀ + αH` is
+rank `Ne−1`. The operator uses a symmetric-PSD pseudoinverse (eigendecomposition,
+`rcond` relative to the largest eigenvalue) that drops the null direction —
+correct for both the CAR and the `ref => 'none'` full-rank cases. `V_fem_normal`
+is average-referenced over its 231 electrodes; an electrode subset is
+re-referenced over the chosen electrodes with `avg_reference`, so a montage is
+simulated by taking those leadfield rows.
+
+### Worked example — `examples/nyhead_inverse.pl`
+
+Seeds a known cortical source, forward-projects it to a scalp topography,
+inverts, and reports the peak vertex, its distance to the seed (mm), and its
+Harvard–Oxford area; `--montage` compares electrode subsets.
+
+```
+# synthetic, runs anywhere (no data)
+perl -Ilib examples/nyhead_inverse.pl --demo --method eloreta \
+     --montage all --montage 19 --montage 0,1,2,3
+
+# real New York Head leadfield (needs PDL::IO::NYHead + sa_nyhead.mat)
+perl -Ilib examples/nyhead_inverse.pl --mat sa_nyhead.mat \
+     --method eloreta --seed-area "Postcentral Gyrus" --out powers.dat
+```
+
+Noiseless, every montage localizes the seed exactly (0.0 mm) — the analytic
+exact-localization result; `--snr <dB>` adds noise and the error grows as
+electrodes are removed. `--out` writes the `Ns`-row source power in cortex75K
+vertex order, which the GS3D New York Head viewer (`PDL::Graphics::Cairo`,
+`demo_gs3d_nyhead.pl --source-power`) colours onto the cortical mesh.
+
+The operators are cross-checked element-wise against an independent NumPy
+implementation (`examples/verify_inverse_numpy.py`) to machine precision, and
+eLORETA reproduces the single-point exact-zero-localization result of
+Pascual-Marqui.
+
 ## Tests
 
 ```
-make test        # 16 files (t/06 reserved/skipped), 376 subtests
+make test        # 17 files (t/06 reserved/skipped), 390 subtests
 ```
 
 `t/01_nihonkohden` `t/02_edf` `t/03_ptn` `t/04_signal` `t/05_montage`
@@ -422,6 +493,10 @@ thin-plate-spline grid; render-free, needs only PDL).
 `t/16_tfa` (TFA: Morlet wavelet energy, tone/burst localisation, ITC, baseline
 modes, superlet, across-trial reliability, evoked/induced decomposition;
 render-free, needs only PDL).
+`t/17_minimumnorm` (MinimumNorm inverse: storage convention, forward linearity,
+transpose rejection, MNE operator vs the closed form, sLORETA/eLORETA exact
+single-source localization, CAR multi-source tracking; render-free, needs only
+PDL).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real
