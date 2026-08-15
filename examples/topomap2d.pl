@@ -16,7 +16,8 @@ my @channel_names4topo; for(my $i=0;$i<$rh->{general}->{ChannelN};$i++) { $chann
 print "Got channels names for topo:"; &mat::DISPLAY_1DY(\@channel_names4topo);
 my $map_time = $lat + $rh->{average}->{pretrigger};
 my $basename = basename($infile); my $outfile; my $how2cut; my ($fig, $ax);
-my $elc = '/Users/goosh/src/PDL_EEG_MAP2D/t/data/standard_1020_eog_nose.elc' || '/Users/goosh/src/PDL_IO_NYHead/standard_1020_plus_4eog.7.elc' || '/Users/goosh/src/NYHead/standard_1020.elc'; 
+# my $elc = '/Users/goosh/src/PDL_EEG_MAP2D/t/data/standard_1020_eog_nose.elc' || '/Users/goosh/src/PDL_IO_NYHead/standard_1020_plus_4eog.7.elc' || '/Users/goosh/src/NYHead/standard_1020.elc'; 
+my $elc = '/Users/goosh/src/PDL_IO_NYHead/standard_1020_plus_4eog.7.elc' || '/Users/goosh/src/NYHead/standard_1020.elc'; 
 my $silhouette = '/Users/goosh/src/PDL_EEG/t/data/sagittal_silhouette.poly' || 'Users/goosh/src/PDL_EEG_MAP2D/t/data/sagittal_silhouette.poly';
 
 if($orientation =~ /[Aa]x/) { $how2cut = "axial"; } elsif($orientation =~ /[Ll]t/) { $how2cut = "sagittal-left"; } elsif($orientation =~ /[Rr]t/) { $how2cut = "sagittal-right"; } else {$how2cut = "panel3"; }
