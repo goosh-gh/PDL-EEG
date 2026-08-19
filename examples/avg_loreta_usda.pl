@@ -1,30 +1,39 @@
 #!/usr/bin/env perl
 #
-# erp_loreta_usda.pl
-#   多チャンネル・多潜時 LORETA -> NYHead -> 潜時アニメ USDA(1本)
+# avg_loreta_usda.pl
+#   多チャンネル・多潜時 LORETA -> NYHead -> 潜時アニメ USDA(方式ごと1本)
 #
-#   通常 ERP(1000Hz, 10-20 等)の加算波形を eeg.pm(NK_READ_ONEAVGFILE2)で
+#   加算平均した誘発反応(ERP でも SEP でも)の加算波形を eeg.pm(NK_READ_ONEAVGFILE2)で
 #   直接読み込み、[start_latency, end_latency] の各潜時で皮質源パワーを解いて、
-#   色だけが潜時で変化する単一 .usda(cortex mesh + displayColor.timeSamples)を書く。
+#   色だけが潜時で変化する .usda(cortex mesh + displayColor.timeSamples)を書く。
 #   ※MNE 経由の text ダンプは経由しない(eeg.pm は既に Perl 構造なので round-trip 不要)。
+#   ※--text で MNE np.savetxt 行列(sep_ave.txt 等)も入力可(下記)。
 #
 # 使い方:
-#   perl erp_loreta_usda.pl INFILE START_MS END_MS [options]
-#     INFILE    加算ファイル(eeg.pm が読む)
+#   perl avg_loreta_usda.pl INFILE START_MS END_MS [options]
+#     INFILE    加算ファイル(eeg.pm が読む。--text 指定時は行列テキスト)
 #     START_MS  開始潜時(ms, 刺激=0)
 #     END_MS    終了潜時(ms)
-#   出力: "${INFILE}${START_MS}_${END_MS}_loreta.usda"
+#   出力: 方式ごとに "${INFILE}${START_MS}_${END_MS}_<method>.usda"
+#         (既定は sloreta と eloreta の 2 本)
 #
 # options(既定で 3 引数だけで走る):
 #   --mat PATH        NYHead リードフィールド sa_nyhead.mat
-#   --method NAME     sloreta(既定)|eloreta|mne     ERP は分布源(sloreta/mne)が無難
+#   --method LIST     カンマ区切り。既定 "sloreta,eloreta"=両方出力。単一なら --method sloreta
+#                     使える名: sloreta|eloreta|mne(ERP の広い源は sloreta/mne 寄り)
+#   --reg-frac F      正則化割合(未指定=module 既定 0.05)。大きいほど平滑・広く拾う
+#   --alpha F         明示 Tikhonov α(reg-frac より優先)
 #   --res NAME        cortex10K(既定)|cortex5K|cortex2K  ※75K は面数が u16 を超えるので不可
 #   --step MS         潜時ステップ(既定 0 = 1 サンプル毎)。窓が広い時は間引きに使う
 #   --cmap NAME       inferno(既定)|viridis|hot
-#   --threshold F     [0,1] これ未満は灰色(既定 0)
+#   --threshold F     [0,1] これ未満は灰色(既定 0)。低いほど広く着色
+#   --grey F          閾値下グレイの明るさ(既定 0.45)
 #   --norm global|frame  global(既定)=窓最大で規格化 / frame=各潜時で規格化
+#   --fps HZ          framesPerSecond(既定 0=自動=sfreq/stride)
 #   --no-axes         原点の XYZ 軸トライアドを出さない
 #   --no-colorbar     カラーバーを出さない
+#   --text            INFILE を MNE np.savetxt 行列として読む(検証用)
+#                     +--names FILE(1行1個ラベル) +--sfreq HZ +--tmin SEC(or --pretrigger N)
 #
 # ---- 実機で合わせる箇所(このコンテナでは検証不可)-------------------------
 #   (1) eeg.pm の @INC 追加と load 方法(下の "use eeg;")
@@ -50,7 +59,9 @@ use lib '/Users/goosh/src/PDL_EEG/lib/'; use PDL::EEG::Inverse::MinimumNorm
 
 # ---- defaults -------------------------------------------------------------
 my $MAT       = '/Users/goosh/src/NYHead/sa_nyhead.mat';
-my $method    = 'sloreta';
+my $method    = 'sloreta,eloreta';  # カンマ区切りで複数=方式ごとに別 USDA を出力
+my $reg_frac;               # --reg-frac(未指定=module 既定 0.05)。大=平滑/広く拾う
+my $alpha;                  # --alpha(明示 Tikhonov α, reg_frac より優先)
 my $res       = 'cortex10K';
 my $step_ms   = 0;          # 0 = 1 サンプル毎
 my $cmap      = 'inferno';
@@ -61,6 +72,12 @@ my $fps       = 0;          # framesPerSecond。0=自動(=sfreq/stride) → Fram
 my $axes      = 1;
 my $colorbar  = 1;
 my $base_grey = 0.45;       # 閾値下の灰色レベル
+# --- テキスト入力モード(sep_ave.txt 検証用) ---
+my $text_mode = 0;          # 1 = INFILE を MNE np.savetxt 行列として読む
+my $names_file;             # チャンネル名(1行1個)
+my $opt_sfreq;              # --text 時の sfreq(Hz)
+my $opt_tmin;               # --text 時の tmin(秒, MNE 規約。例 -0.05)
+my $opt_pre;                # --text 時の pretrigger(サンプル数, tmin の代わり)
 
 GetOptions(
     'mat=s'       => \$MAT,
@@ -74,6 +91,13 @@ GetOptions(
     'grey=f'      => \$base_grey,
     'axes!'       => \$axes,
     'colorbar!'   => \$colorbar,
+    'text'        => \$text_mode,
+    'names=s'     => \$names_file,
+    'sfreq=f'     => \$opt_sfreq,
+    'tmin=f'      => \$opt_tmin,
+    'pretrigger=i'=> \$opt_pre,
+    'reg-frac=f'  => \$reg_frac,
+    'alpha=f'     => \$alpha,
 ) or die "bad options\n";
 
 my ($infile, $start_lat, $end_lat) = @ARGV;
@@ -81,27 +105,53 @@ die "usage: $0 INFILE START_MS END_MS [--mat .. --method .. --res .. --step ..]\
     unless defined $end_lat;
 
 # 出力名は指定どおり(拡張子は剥がさない)
-my $outfile = "$infile" ."."."$start_lat" . "_" . "$end_lat" . "_loreta.usda";
+my $outbase = "$infile" . "$start_lat" . "_" . "$end_lat";   # 実際の出力は "..._<method>.usda"
 
-# ---- 1. eeg.pm で加算読込 -------------------------------------------------
-my ($rd, $rh) = eeg::NK_READ_ONEAVGFILE2("$infile", "trgCH", 0);
+# ---- 1. データ読込: eeg.pm(既定) or sep_ave.txt テキスト行列(--text) ------
+my ($data, $nch, $sfreq, $pre, @labels);
 
-my $nch   = $rh->{general}{ChannelN};
-my $sfreq = $rh->{average}{sampling_freq};
-my $pre   = $rh->{average}{pretrigger};        # baseline サンプル数(t=0 の index)
-my @labels = map { $rh->{ChannelName}{$_} } 0 .. $nch - 1;
+if ($text_mode) {
+    # sep_ave.txt = MNE np.savetxt(ev.data): n_ch × n_time, 空白区切り, V。
+    # ラベルは --names(1行1個), sfreq は --sfreq, t=0 は --tmin(秒) or --pretrigger。
+    open my $mfh, '<', $infile or die "open $infile: $!";
+    my @rows;
+    while (<$mfh>) { next unless /\S/; push @rows, [ map { $_+0 } split ' ' ]; }
+    close $mfh;
+    $nch  = scalar @rows;
+    $data = pdl(\@rows);                        # (n_time, n_ch)
+    $data = $data->xchg(0,1)->sever if $data->dim(0) != $nch && $data->dim(1) == $nch;
+    die "text matrix: channel dim ($nch) not in [".join('x',$data->dims)."]\n"
+        unless $data->dim(0) == $nch;
 
-# データを (Ne, Nt) piddle に正規化(dim0=電極, dim1=時間)
-my $data = (ref($rd) eq 'PDL') ? $rd->copy : pdl($rd);
-if ($data->dim(0) != $nch && $data->dim(1) == $nch) {
-    $data = $data->xchg(0, 1)->sever;          # (Nt,Nch) -> (Nch,Nt)
+    die "--names FILE required with --text\n" unless $names_file;
+    open my $nfh, '<', $names_file or die "open $names_file: $!";
+    @labels = <$nfh>; close $nfh;
+    chomp @labels;
+    @labels = grep { /\S/ } @labels;
+    s/^\s+|\s+$//g for @labels;
+    die "names count (".scalar(@labels).") != channels ($nch)\n" unless @labels == $nch;
+
+    $sfreq = $opt_sfreq or die "--sfreq HZ required with --text\n";
+    $pre   = defined $opt_pre  ? $opt_pre
+           : defined $opt_tmin ? int(-$opt_tmin * $sfreq + 0.5)
+           : die "--tmin SEC (or --pretrigger N) required with --text\n";
+} else {
+    my ($rd, $rh) = eeg::NK_READ_ONEAVGFILE2("$infile", "trgCH", 0);
+    $nch   = $rh->{general}{ChannelN};
+    $sfreq = $rh->{average}{sampling_freq};
+    $pre   = $rh->{average}{pretrigger};        # baseline サンプル数(t=0 の index)
+    @labels = map { $rh->{ChannelName}{$_} } 0 .. $nch - 1;
+
+    # データを (Ne, Nt) piddle に正規化(dim0=電極, dim1=時間)
+    $data = (ref($rd) eq 'PDL') ? $rd->copy : pdl($rd);
+    $data = $data->xchg(0, 1)->sever if $data->dim(0) != $nch && $data->dim(1) == $nch;
+    die "channel dim ($nch) not found in data dims [".join('x',$data->dims)."]\n"
+        unless $data->dim(0) == $nch;
 }
-die "channel dim ($nch) not found in data dims [".join('x',$data->dims)."]\n"
-    unless $data->dim(0) == $nch;
 my $nt = $data->dim(1);
 
-printf STDERR "loaded: %d ch x %d samp @ %g Hz, pretrigger=%d samp (t=0)\n",
-    $nch, $nt, $sfreq, $pre;
+printf STDERR "loaded: %d ch x %d samp @ %g Hz, pretrigger=%d samp (t=0)%s\n",
+    $nch, $nt, $sfreq, $pre, ($text_mode ? " [text]" : "");
 
 # ---- 2. 潜時窓 -> サンプル index ------------------------------------------
 my $spms = $sfreq / 1000.0;                     # samples per ms
@@ -160,79 +210,88 @@ warn "skipped (no NYHead match): @skipped\n" if @skipped;
 my $drows = pdl(long, @data_rows);
 my $nrows = pdl(long, @ny_rows);
 
-# ---- 4. 逆作用素を 1 回だけ構築 -------------------------------------------
+# ---- 4. 電極 subset & 方式非依存の共有前処理 -----------------------------
 # leadfield は NYHead で (Ne=231, Ns=74382)=(電極,源)。inverse_operator は数学 K=(Ns,Ne)
 # を要求する(Ns>Ne を assert)。電極を subset して転置し (Ns, Ne_sub) で渡す。
 my $K = $ny->leadfield->dice_axis(0, $nrows)->transpose->sever;   # (Ns, Ne_sub)
 $K = avg_reference($K);   # subset 上で再 CAR: 各源の電極平均を引き K と data の参照を揃える
-my $op = inverse_operator($K, method => $method);   # ref=>'car' 既定, sloreta は標準化込み
 my $Ns = $K->dim(0);
 
 # データ側も同じ電極・同じ順に切り出し(以降 (Ne_sub, Nt))
 my $dsub = $data->dice_axis(0, $drows)->sever;
 
-# ---- 5. 潜時ごとに源パワー -----------------------------------------------
-my @frames;         # 各要素 = 源パワー (Ns)
-my @lat_ms;
-my $gmax = 0;
-for my $i (@frame_idx) {
-    my $b = $dsub->slice(":,($i)")->sever;    # (Ne_sub) その潜時のトポ
-    $b = $b - $b->avg;                        # トポを CAR(電極平均を引く)
-                                              #   ※centering() は n×n 行列生成子なので不可
-    my $pw = source_power($op, $b);           # (Ns) 標準化源パワー(>=0)
-    push @frames, $pw;
-    push @lat_ms, ($i - $pre) / $spms;
-    my $m = $pw->max->sclr;
-    $gmax = $m if $m > $gmax;
-}
-$gmax = 1 if $gmax <= 0;
-
-# ---- 6. 皮質メッシュ & 正規化 & 頂点色 -----------------------------------
+# 皮質メッシュ(方式非依存, 1 回だけ)
 my $cx  = $ny->cortex($res);                  # {vc=>(Nv,3), tri=>(Nf,3), in_from=>(Nv)}
 my $vc  = $cx->{vc};
 my $tri = $cx->{tri};
 my $inf = $cx->{in_from};                      # local -> 75K(0-based)。75K なら identity
 my $Nv  = $vc->dim(0);
 
-my @frame_rgb;                                 # 各要素 = (Nv,3) in [0,1]
-my @peak_lines;                                # 診断: 潜時ごとの peak
-for my $f (0 .. $#frames) {
-    my $pw = $frames[$f];
-    # 75K -> res 頂点へ
-    my $pv = (defined $inf) ? $pw->index($inf) : $pw;   # (Nv)
-    my $norm_max = ($norm eq 'frame') ? ($pv->max->sclr || 1) : $gmax;
-    my $t = ($pv / $norm_max)->clip(0, 1);              # (Nv) in [0,1]
-    push @frame_rgb, overlay_rgb($t, $cmap, $threshold, $base_grey);
+# 逆作用素の共通オプション(reg-frac / alpha; 未指定なら module 既定)
+my @io_common;
+push @io_common, (reg_frac => $reg_frac) if defined $reg_frac;
+push @io_common, (alpha    => $alpha)    if defined $alpha;
 
-    # 診断: peak 頂点(75K)と HO ラベル
-    my $vmax = $pw->maximum_ind->sclr;
-    my $area = eval { $ny->can('area_of_vertex') ? $ny->area_of_vertex($vmax) : '' } // '';
-    push @peak_lines, sprintf("%.1f\t%d\t%s\t%.4g",
-        $lat_ms[$f], $vmax, $area, $pw->max->sclr);
+my @methods = grep { /\S/ } map { s/^\s+|\s+$//gr } split /,/, $method;
+die "no method given\n" unless @methods;
+
+# ---- 5-7. 方式ごとに: 逆作用素 → 潜時掃引 → 頂点色 → USDA -----------------
+for my $meth (@methods) {
+    my $op = inverse_operator($K, method => $meth, @io_common);   # ref=>'car' 既定
+
+    # 潜時ごとに源パワー
+    my (@frames, @lat_ms);
+    my $gmax = 0;
+    for my $i (@frame_idx) {
+        my $b = $dsub->slice(":,($i)")->sever;    # (Ne_sub) その潜時のトポ
+        $b = $b - $b->avg;                        # トポを CAR(電極平均を引く)
+                                                  #   ※centering() は n×n 行列生成子なので不可
+        my $pw = source_power($op, $b);           # (Ns) 源パワー(sloreta/eloreta は標準化統計量²)
+        push @frames, $pw;
+        push @lat_ms, ($i - $pre) / $spms;
+        my $m = $pw->max->sclr;
+        $gmax = $m if $m > $gmax;
+    }
+    $gmax = 1 if $gmax <= 0;
+
+    # 正規化 & 頂点色 & 診断(方式ごとに規格化=方式間で明るさは独立)
+    my (@frame_rgb, @peak_lines);
+    for my $f (0 .. $#frames) {
+        my $pw = $frames[$f];
+        my $pv = (defined $inf) ? $pw->index($inf) : $pw;      # (Nv)
+        my $norm_max = ($norm eq 'frame') ? ($pv->max->sclr || 1) : $gmax;
+        my $t = ($pv / $norm_max)->clip(0, 1);
+        push @frame_rgb, overlay_rgb($t, $cmap, $threshold, $base_grey);
+
+        my $vmax = $pw->maximum_ind->sclr;
+        my $area = eval { $ny->can('area_of_vertex') ? $ny->area_of_vertex($vmax) : '' } // '';
+        push @peak_lines, sprintf("%.1f\t%d\t%s\t%.4g",
+            $lat_ms[$f], $vmax, $area, $pw->max->sclr);
+    }
+    print STDERR "[$meth] lat_ms\tpeak_v75k\tHO_area\tpeak_pow\n";
+    print STDERR "[$meth] $_\n" for @peak_lines;
+
+    my $out = "${outbase}_${meth}.usda";
+    write_anim_usda(
+        outfile  => $out,
+        vc       => $vc,
+        tri      => $tri,
+        frames   => \@frame_rgb,
+        lat_ms   => \@lat_ms,
+        axes     => $axes,
+        colorbar => $colorbar,
+        cmap     => $cmap,
+        threshold=> $threshold,
+        grey     => $base_grey,
+        norm     => $norm,
+        fps      => $fps_out,
+        infile   => $infile,
+        method   => $meth,
+        res      => $res,
+    );
+    printf STDERR "wrote %s (%d frames, %d verts, %s)\n",
+        $out, scalar(@frame_rgb), $Nv, $res;
 }
-print STDERR "lat_ms\tpeak_v75k\tHO_area\tpeak_pow\n";
-print STDERR "$_\n" for @peak_lines;
-
-# ---- 7. USDA 書き出し -----------------------------------------------------
-write_anim_usda(
-    outfile  => $outfile,
-    vc       => $vc,
-    tri      => $tri,
-    frames   => \@frame_rgb,
-    lat_ms   => \@lat_ms,
-    axes     => $axes,
-    colorbar => $colorbar,
-    cmap     => $cmap,
-    threshold=> $threshold,
-    grey     => $base_grey,
-    norm     => $norm,
-    fps      => $fps_out,
-    infile   => $infile,
-    method   => $method,
-    res      => $res,
-);
-printf STDERR "wrote %s (%d frames, %d verts, %s)\n",
-    $outfile, scalar(@frame_rgb), $Nv, $res;
 
 # ==========================================================================
 #  helpers
