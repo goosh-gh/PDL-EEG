@@ -756,7 +756,8 @@ sub plot_topomap_panels {
                  : $view =~ /right/i ? 'right'
                  : $view =~ /left/i  ? 'left' : $view;
         plot_topomap(%common, orientation => $view, clim => $clim,
-                     _ax => $pax, _fig => $fig, colorbar => 0, title => $pt);
+#                     _ax => $pax, _fig => $fig, colorbar => 0, title => $pt); ### subtitle for left/axial/right
+                     _ax => $pax, _fig => $fig, colorbar => 0, title=>'' );
     }
 
     # shared colorbar
@@ -774,7 +775,7 @@ sub plot_topomap_panels {
     $cax->text($xr, 1.5,         sprintf('%.1f',$lo), fontsize=>($a{cbar_size} // 9), %al);
     $cax->set_title($a{unit} // 'uV', fontsize=>($a{cbar_size} // 9));
 
-    $fig->suptitle($a{title}, fontsize => ($a{title_size} // 13)) if defined $a{title};
+    $fig->suptitle($a{title}, fontsize => ($a{title_size} // 13)) if defined $a{title}; ### FILENAME,LAT,GAIN
     $fig->save($a{outfile}) if $a{outfile};
 
     my $dev = lc($a{device} // $a{backend} // 'png');
