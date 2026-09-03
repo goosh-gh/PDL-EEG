@@ -9,7 +9,6 @@ use PDL;
 use PDL::MatrixOps qw(inv);
 use PDL::EEG::IO::ASA ();
 
-our $VERSION = '0.01';
 
 our @EXPORT_OK = qw(
     plot_topomap
@@ -323,8 +322,11 @@ sub plot_topomap {
         ($ipx, $ipy, $iv) = ($px->index($ri), $py->index($ri), $Vv->index($ri))
             if $ri->nelem >= 3;
     }
+    # head_extent: データ座標の半幅[-EXT,EXT]。既定 0.6(円 R=0.5 の外に 0.1 余白=耳/鼻用)。
+    # 小さくすると円が軸箱いっぱいに広がる(余白減)。~0.55 未満だと耳/鼻が切れ得る。
     my ($field, $inside, $EXT) =
-        interpolate_topo($ipx, $ipy, $iv, res => ($a{res} // 220), clip => $R_clip);
+        interpolate_topo($ipx, $ipy, $iv, res => ($a{res} // 220), clip => $R_clip,
+                         (defined $a{head_extent} ? (extent => $a{head_extent}) : ()));
 
     # ---- colour limits (from scalp reference, so EOG can't blow the scale) --
     my ($lo, $hi);

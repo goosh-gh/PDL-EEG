@@ -5,8 +5,6 @@ use warnings;
 use Carp qw(croak carp);
 use PDL;
 
-our $VERSION = '0.02';
-
 use Exporter 'import';
 our @EXPORT_OK = qw(write_mul read_mul);
 

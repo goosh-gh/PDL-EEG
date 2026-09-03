@@ -6,7 +6,6 @@ use Carp qw(croak);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(parse_ptn list_montages find_montage_file);
-our $VERSION   = '0.02';
 
 =head1 NAME
 

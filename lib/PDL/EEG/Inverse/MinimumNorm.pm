@@ -8,7 +8,6 @@ our @EXPORT_OK = qw(
     avg_reference
     inverse_operator apply_inverse source_estimate source_power
 );
-our $VERSION = '0.01';
 
 # ---------------------------------------------------------------------------
 # Convention (explicit, because dim order is the classic silent bug source):

@@ -5,8 +5,6 @@ use warnings;
 use Carp qw(croak carp);
 use PDL;
 
-our $VERSION = '0.01';
-
 use Exporter 'import';
 our @EXPORT_OK = qw(read_elc parse_ELEC_POS3D_ASA_4AdventCalendar);
 

@@ -7,8 +7,6 @@ use Encode qw(decode);
 use POSIX ();
 use PDL;
 
-our $VERSION = '0.02';
-
 =head1 NAME
 
 PDL::EEG::IO::NihonKohden - Read Nihon Kohden EEG binary files into PDL

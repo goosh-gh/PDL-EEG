@@ -9,7 +9,6 @@ use Encode qw(encode decode);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(write_edf read_edf clean_edf_label);
-our $VERSION   = '0.02';
 
 =head1 NAME
 

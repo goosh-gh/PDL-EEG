@@ -8,7 +8,6 @@ use PDL::EEG::IO::NihonKohden::PTN qw(parse_ptn find_montage_file);
 use PDL::EEG::Signal qw(detect_square_pulses);
 
 our @EXPORT_OK = qw(montage_from_log resolve_labels);
-our $VERSION   = '0.02';
 
 =head1 NAME
 
