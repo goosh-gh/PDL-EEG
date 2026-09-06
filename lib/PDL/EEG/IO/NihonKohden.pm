@@ -1009,11 +1009,22 @@ sub _read_wfm_header {
     croak "Zero channel entries in waveform block" unless $n_ch_entries > 0;
 
     # 10-byte entries starting at +0x2F: [0x10][0x05][ch_idx][0×7]
+#    my @ch_indices;
+#     for my $i (0 .. $n_ch_entries - 1) { my $eoff = $addr + 0x2F + $i * 10; push @ch_indices, _read_u8($fh, $eoff + 2); }
+
+    # Records are 10 bytes starting at +0x27 (data begins at
+    # +0x27 + n_ch_entries*10 = +0x171). The electrode code is the record's
+    # FIRST byte; the [0x10 0x05] pair is its trailing 2 bytes, not a header
+    # -- anchoring on it read the next record's code (off-by-one that cancels
+    # for contiguous 10-20 codes but shifts every aux channel).
+    # +1 keeps ch_indices 1-based so the shared .21e[code-1] lookup stays valid
+    # (matches the extblock path).
+
     my @ch_indices;
     for my $i (0 .. $n_ch_entries - 1) {
-        my $eoff = $addr + 0x2F + $i * 10;
-        push @ch_indices, _read_u8($fh, $eoff + 2);
+        push @ch_indices, _read_u8($fh, $addr + 0x27 + $i * 10) + 1;
     }
+
 
     return {
         n_ch        => $n_ch_entries + 1,     # data-stream channels (incl. zero-pad)

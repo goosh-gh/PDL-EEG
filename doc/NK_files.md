@@ -1,4 +1,7 @@
-# Nihon Kohden EEG-1200A recording bundle — file reference
+# Nihon Kohden recording bundle — file reference
+
+> Module API and layouts: see [`NihonKohden.md`](NihonKohden.md),
+> [`NK_block_layouts.md`](NK_block_layouts.md), [`NK_extblock.md`](NK_extblock.md).
 
 Files written by a Neurofax EEG-1200A (headbox JE-208A / JE-92NX) for one
 recording, e.g. `subject.*`. Basename is shared; each extension carries a
@@ -11,7 +14,7 @@ different part of the session. Verified against the `subject` MMN recording
 |------|------|----------|
 | `.EEG` | binary | The waveform. EEG-1100C uses `wfmblock`, EEG-1200A uses `extblock`. Header holds the format signature (`EEG-1200A V01.00`), the linked `.PNT`, the acquisition start timestamp (`YYYYMMDDhhmmssn`), the headbox model (`JE-208A`), and per-segment start times. Read by `read_nk`. |
 | `.pnt` / `.PNT` | binary | Patient / study identification (patient ID, study name e.g. `MMN Trigger`, dates, protocol comments). |
-| `.21E` | text (Shift_JIS, CRLF) | ★ Electrode & reference table. Sections: `[ELECTRODE]` (`0000=Fp1` … including `0020=BN1`, `0021=BN2`, `0037=BN`, `0038=AV`), `[REFERENCE]` (`$`-prefixed reference pseudo-electrodes `$BN`, `$AV`, `$Cz`, `$A1`, `$A2` …), `[SD_DEF]` (standard-derivation weights — **empty** here), `[SYSTEM_SETUP]` (**`SystemReference=C3,C4`**, `DeviceName=<JE-92NX>`), `[LASTPATTERN]` (**`PATTERN=36`** = recording-time display montage, `REFERENCE=-1`). Parsed by `_read_21e`; `read_nk` now also exposes `system_reference` and `last_pattern`. |
+| `.21E` | text (Shift_JIS, CRLF) | ★ Electrode & reference table. Sections: `[ELECTRODE]` (`0000=Fp1` … including `0020=BN1`, `0021=BN2`, `0037=BN`, `0038=AV`), `[REFERENCE]` (`$`-prefixed reference pseudo-electrodes `$BN`, `$AV`, `$Cz`, `$A1`, `$A2` …), `[SD_DEF]` (standard-derivation weights — **empty** here), `[SYSTEM_SETUP]` (**`SystemReference=C3,C4`**, `DeviceName=<JE-92NX>`), `[LASTPATTERN]` (**`PATTERN=36`** = recording-time display montage, `REFERENCE=-1`). Parsed by `_read_21e`; `read_nk` also exposes `system_reference` and `last_pattern`. |
 
 ## Events, log & montage timeline
 
@@ -53,6 +56,7 @@ different part of the session. Verified against the `subject` MMN recording
 `data` `[n_ch, n_samp]` µV · `fs` · `labels` · `t_start` · `events` · `gains` ·
 `gap_bounds` · `t_block_starts` · `device` · `layout` ·
 **`system_reference`** (e.g. `"C3,C4"`) · **`last_pattern`** (e.g. `36`).
+Full contract: [`NihonKohden.md`](NihonKohden.md).
 
 ## Downstream re-reference (`PDL::EEG::Derivation`)
 
