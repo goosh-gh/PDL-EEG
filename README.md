@@ -1,8 +1,9 @@
 # PDL::EEG â Nihon Kohden / EDF / BESA EEG toolkit
 
 Read Nihon Kohden Neurofax recordings in PDL, resolve headbox-independent
-trigger/channel labels, re-reference (incl. balanced non-cephalic), and export
-to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
+trigger/channel labels, re-reference (incl. balanced non-cephalic), remove
+eye-blink artifacts (GED), and export to EDF/EDF+ or BESA ASCII multiplexed
+(`.mul`).
 
 ## Requirements
 
@@ -27,6 +28,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `PDL::EEG::MAP2D` | `plot_topomap` â 2D scalp voltage map for one latency from a voltage vector + an ASA `.elc`. `orientation` selects the round **axial** map (sphere-fit azimuthal-equidistant, nose up, thin-plate-spline clipped to the head disc) or a **sagittal** side view (`sagittal-left` / `sagittal-right`, orthographic projection through the Fz-Cz-Pz plane, thin-plate-spline clipped to a head-profile silhouette). `plot_topomap_panels` draws several views in one figure on a shared colour scale. Renders with `PDL::Graphics::Cairo` (loaded on demand). |
 | `PDL::EEG::TFA` | Continuous complex-Morlet time-frequency analysis (CWT), with frequency-domain convolution via `PDL::FFT` (no external wavelet dependency). `tfr_morlet`'s `output` gives total power, inter-trial coherence, or an exact phase-locked (`evoked`) / non-phase-locked (`induced`) power split (`power = evoked + induced`); `tfr_superlet` is the adaptive multiplicative superlet for short HFO bursts; `tfr_stat` is the across-trial reliability `z = mean/SEM`; `apply_baseline` normalises per frequency (`zscore`/`ratio`/`logratio`/`percent`/`mean`). |
 | `PDL::EEG::Inverse::MinimumNorm` | L2 minimum-norm distributed source localization on a surface-normal-constrained leadfield (New York Head `V_fem_normal`, or any leadfield of the same shape). `inverse_operator`/`apply_inverse`/`source_estimate`/`source_power` build one data-independent inverse operator and apply it; `method` selects **MNE**, **sLORETA**, or **eLORETA** (same operator, different per-source standardization), `ref` is average (CAR, default â a symmetric-PSD pseudoinverse handles the rank-deficient Gram) or `none`, regularization is `reg_frac`/`alpha`, eLORETA takes `max_iter`/`tol`. `forward_project` is `b = K j`; `avg_reference` re-references an electrode subset for montage studies. `source_power` returns the standardized (dimensionless) source statistic. Pure PDL + `PDL::MatrixOps`; the real leadfield loads via `PDL::IO::NYHead`. |
+| `PDL::EEG::GED` | GED (generalized eigenvalue decomposition) spatial filter for eye-blink removal. `ged_cov`/`ged_operator`/`apply_ged` are the generic core: solve `S w = lambda R w` (LAPACK `sygvd` via `PDL::LinearAlgebra`; eigenvectors are R-orthonormal, so patterns `A = R W` are biorthogonal to filters `W` and removing a component subset is the exact oblique projection `X - A_sel (W_sel' X)`), with shrinkage on `R`. `detect_blinks`/`blink_free`/`blink_evoked`/`fit_blink`/`remove_blinks` are the blink workflow: build `S` from a vEOG-detected, peak-normalised blink-averaged evoked and `R` from blink-free background **taken from the recording being cleaned**, pick the blink component by vEOG-evoked correlation, and remove it by back-projection. `remove_blinks` returns `(subtracted, removed, operator)` with `subtracted + removed = input`. Single blink-component removal; data layout `(nch, nt)`. Pure PDL + `PDL::LinearAlgebra`. |
 ## Command-line tools
 
 | Tool | Role |
@@ -59,6 +61,7 @@ to EDF/EDF+ or BESA ASCII multiplexed (`.mul`).
 | `examples/includeORexcludeEEC.pl` | **Proxy-electrode A/B source study.** Runs the eLORETA inverse **without** a channel and **with** it, where the extra channel's measured potential is paired with a nearby modelled electrode's leadfield row (a *proxy*), and reports the peak vertex / HarvardâOxford area / MNI, peak shift (mm), whole-cortex correlation of the two source maps, and normalized max difference; writes `proxy_without.dat` / `proxy_with_<proxy>.dat` (cortex75K order) for the GS3D overlay. `--proxy` (comma list of leadfield electrodes), `--latency` (or GFP auto-pick), `--reg-frac`, `--ear-label`. `--self-test` runs the whole with/without comparison on a synthetic leadfield â no data or `.mat` â to validate the engine path. The real-data reader is the author's private `eeg.pm` (as in `avg_loreta_usda.pl`). |
 | `examples/sep_gof_sweep.pl` | **Best-single-dipole goodness-of-fit** swept over latency, written as a two-column `latency_ms<TAB>gof` file (feeds the movie's `--gof`). No inverse solve: at each latency it takes the scalp topography and the maximum `|corr|` against every cortical leadfield column (the best fixed-orientation single dipole) — the same quantity `sep_n20_inverse.pl` prints as `best 1-dip`. Electrode-to-leadfield mapping and CAR are as in `sep_n20_sweep.pl`. `--metric corr` (default) or `r2` (variance explained), `--lat-min/--lat-max/--lat-step`, `--avg-ms` (window-average the topography). Reads the same MNE `np.savetxt` `ch × time` dump; needs the NY Head `.mat` via `PDL::IO::NYHead`. |
 | `examples/sep_nonHFO_movie.3panel.pl` | **Three-panel latency movie** — waveforms · a 2D scalp topomap · the ECD goodness-of-fit curve, one frame per latency, assembled with `ffmpeg` into an mp4/gif. The three columns are equal width; each waveform trace is coloured by its **polarity at the N20 latency** (cool = negative, warm = positive, discrete palettes) to match the topomap. Reads the same `--text` `ch × time` dump + labels + `--montage` `.elc` (the private `eeg.pm` reader is not used), takes the GoF curve from `sep_gof_sweep.pl` via `--gof`, and draws the topomap with `PDL::EEG::MAP2D`. `--wave-chans`, `--gof-min-ms/--gof-max-ms`, `--anim-min-ms/--anim-max-ms/--step-ms`, `--polarity-ms`, `--neg-up`, `--head-extent`, `--figw/--figh`. Needs `PDL::Graphics::Cairo` **0.2+** (axis-off colour bar + content-aware margins) and `ffmpeg`. |
+| `examples/blink_ged_clean.pl` | Eye-blink removal on a continuous EDF via `PDL::EEG::GED`. Reads `TASK.edf` (plus an optional `VOLUNTARY_BLINKS.edf` whose blinks define the pattern), detects blinks on vEOG, fits the GED blink filter (`S` from the voluntary session's peak-normalised blink evoked, `R` from the task's blink-free background), removes the blink component, and writes the result -- the extension picks the format: `.edf` via `PDL::EEG::IO::EDF::write_edf`, `.mul` via `PDL::EEG::IO::BESA::ASCII::write_mul` (loaded on demand). By default every signal channel is filtered (EOG included) and the **whole recording** is written (filtered channels replaced, DC/Event/Marker and `--exclude` channels passed through, start time preserved), so DC trigger channels survive for epoching/averaging. `--montage-only` writes only the filtered channels; `--out`/`--out-removed` (cleaned / removed-artifact EDF or `.mul`), `--exclude LABEL,...`, `--trim-sec`, `--n`, `--reg`, `--veog`. |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -572,3 +575,12 @@ conversion memory-bounded and several times faster than the naÃ¯ve approach.
   signal's rate. EDF permits per-signal rates, but multi-rate reads are not
   implemented. (This affects only third-party EDFs; files written by `write_edf`
   are always single-rate.)
+- **GED blink removal is a single spatial component.**
+  `examples/blink_ged_clean.pl` / `PDL::EEG::GED` remove the one blink component
+  (the top vEOG-correlated generalized eigenvector). Frontal channels (Fp1/Fp2)
+  clean well; vEOG and especially hEOG reduce less, because their averaged
+  deflection also carries non-blink eye activity (vertical drift, horizontal
+  saccades) that a vertical-blink filter correctly leaves in place. Removing more
+  components (`--n 2`/`3`) reduces the EOG channels further but starts eroding
+  real signal, so top-1 is the default. Fit `R` (the background) from the
+  recording being cleaned, not a different session, to avoid over-removal.
