@@ -29,6 +29,9 @@ eye-blink artifacts (GED), and export to EDF/EDF+ or BESA ASCII multiplexed
 | `PDL::EEG::TFA` | Continuous complex-Morlet time-frequency analysis (CWT), with frequency-domain convolution via `PDL::FFT` (no external wavelet dependency). `tfr_morlet`'s `output` gives total power, inter-trial coherence, or an exact phase-locked (`evoked`) / non-phase-locked (`induced`) power split (`power = evoked + induced`); `tfr_superlet` is the adaptive multiplicative superlet for short HFO bursts; `tfr_stat` is the across-trial reliability `z = mean/SEM`; `apply_baseline` normalises per frequency (`zscore`/`ratio`/`logratio`/`percent`/`mean`). |
 | `PDL::EEG::Inverse::MinimumNorm` | L2 minimum-norm distributed source localization on a surface-normal-constrained leadfield (New York Head `V_fem_normal`, or any leadfield of the same shape). `inverse_operator`/`apply_inverse`/`source_estimate`/`source_power` build one data-independent inverse operator and apply it; `method` selects **MNE**, **sLORETA**, or **eLORETA** (same operator, different per-source standardization), `ref` is average (CAR, default â a symmetric-PSD pseudoinverse handles the rank-deficient Gram) or `none`, regularization is `reg_frac`/`alpha`, eLORETA takes `max_iter`/`tol`. `forward_project` is `b = K j`; `avg_reference` re-references an electrode subset for montage studies. `source_power` returns the standardized (dimensionless) source statistic. Pure PDL + `PDL::MatrixOps`; the real leadfield loads via `PDL::IO::NYHead`. |
 | `PDL::EEG::GED` | GED (generalized eigenvalue decomposition) spatial filter for eye-blink removal. `ged_cov`/`ged_operator`/`apply_ged` are the generic core: solve `S w = lambda R w` (LAPACK `sygvd` via `PDL::LinearAlgebra`; eigenvectors are R-orthonormal, so patterns `A = R W` are biorthogonal to filters `W` and removing a component subset is the exact oblique projection `X - A_sel (W_sel' X)`), with shrinkage on `R`. `detect_blinks`/`blink_free`/`blink_evoked`/`fit_blink`/`remove_blinks` are the blink workflow: build `S` from a vEOG-detected, peak-normalised blink-averaged evoked and `R` from blink-free background **taken from the recording being cleaned**, pick the blink component by vEOG-evoked correlation, and remove it by back-projection. `remove_blinks` returns `(subtracted, removed, operator)` with `subtracted + removed = input`. Single blink-component removal; data layout `(nch, nt)`. Pure PDL + `PDL::LinearAlgebra`. |
+| `PDL::EEG::ICA` | Symmetric FastICA in pure PDL (no LAPACK: whitening and the symmetric orthogonalization use `PDL::MatrixOps` `eigens_sym`). `ica_decompose` returns unmixing/mixing matrices and component activations; `identify_by_reference` scores each component against a reference channel (e.g. vEOG); `apply_ica` reconstructs with a chosen component subset removed. Data layout `(nt, nch)`. Built to compare ICA-based ocular cleaning against `PDL::EEG::GED`. |
+| `PDL::EEG::Spans` | Time-interval annotations shared between the viewer and the artifact remover. A span is `{kind,t0,t1}` in seconds; `read_spans`/`write_spans` persist them to a `<file>.spans.tsv` sidecar; `spans_to_mask` rasterises one `kind` to a per-sample byte mask; `kinds_present` lists the kinds present. `kind` is free-form (`blink`, `hsaccade`, `bad`, or any GED class name). |
+| `PDL::EEG::Regress` | Temporal nuisance / EOG regression. `regress_out($X, @sources)` removes, from every channel of `$X` (nch,nt), the least-squares fit on a set of source time courses (GED or ICA component activations, or raw EOG channels — with EOG channels it is classic Gratton–Coles regression). Sources are orthonormalised first, so correlated sources are partialled out jointly and the removal depends only on the span of the sources, not on labelling any one vertical/horizontal. Channel DC is preserved. Pure PDL. |
 ## Command-line tools
 
 | Tool | Role |
@@ -62,6 +65,10 @@ eye-blink artifacts (GED), and export to EDF/EDF+ or BESA ASCII multiplexed
 | `examples/sep_gof_sweep.pl` | **Best-single-dipole goodness-of-fit** swept over latency, written as a two-column `latency_ms<TAB>gof` file (feeds the movie's `--gof`). No inverse solve: at each latency it takes the scalp topography and the maximum `|corr|` against every cortical leadfield column (the best fixed-orientation single dipole) — the same quantity `sep_n20_inverse.pl` prints as `best 1-dip`. Electrode-to-leadfield mapping and CAR are as in `sep_n20_sweep.pl`. `--metric corr` (default) or `r2` (variance explained), `--lat-min/--lat-max/--lat-step`, `--avg-ms` (window-average the topography). Reads the same MNE `np.savetxt` `ch × time` dump; needs the NY Head `.mat` via `PDL::IO::NYHead`. |
 | `examples/sep_nonHFO_movie.3panel.pl` | **Three-panel latency movie** — waveforms · a 2D scalp topomap · the ECD goodness-of-fit curve, one frame per latency, assembled with `ffmpeg` into an mp4/gif. The three columns are equal width; each waveform trace is coloured by its **polarity at the N20 latency** (cool = negative, warm = positive, discrete palettes) to match the topomap. Reads the same `--text` `ch × time` dump + labels + `--montage` `.elc` (the private `eeg.pm` reader is not used), takes the GoF curve from `sep_gof_sweep.pl` via `--gof`, and draws the topomap with `PDL::EEG::MAP2D`. `--wave-chans`, `--gof-min-ms/--gof-max-ms`, `--anim-min-ms/--anim-max-ms/--step-ms`, `--polarity-ms`, `--neg-up`, `--head-extent`, `--figw/--figh`. Needs `PDL::Graphics::Cairo` **0.2+** (axis-off colour bar + content-aware margins) and `ffmpeg`. |
 | `examples/blink_ged_clean.pl` | Eye-blink removal on a continuous EDF via `PDL::EEG::GED`. Reads `TASK.edf` (plus an optional `VOLUNTARY_BLINKS.edf` whose blinks define the pattern), detects blinks on vEOG, fits the GED blink filter (`S` from the voluntary session's peak-normalised blink evoked, `R` from the task's blink-free background), removes the blink component, and writes the result -- the extension picks the format: `.edf` via `PDL::EEG::IO::EDF::write_edf`, `.mul` via `PDL::EEG::IO::BESA::ASCII::write_mul` (loaded on demand). By default every signal channel is filtered (EOG included) and the **whole recording** is written (filtered channels replaced, DC/Event/Marker and `--exclude` channels passed through, start time preserved), so DC trigger channels survive for epoching/averaging. `--montage-only` writes only the filtered channels; `--out`/`--out-removed` (cleaned / removed-artifact EDF or `.mul`), `--exclude LABEL,...`, `--trim-sec`, `--n`, `--reg`, `--veog`. |
+| `examples/raw_plot.pl` | Interactive span annotator over `giza-server` (`show_interactive`). Scrolls an EDF/NK recording, marks time intervals by mouse (left-click start, left-click end to commit; right-click to delete) under a free-form `--kind` (blink, hsaccade, bad, or any GED class name), and appends them to a `<file>.spans.tsv` sidecar read back by `artifact_remove.pl`. `--chans`, `--aux` auxiliary-channel scaling, per-kind colours. Needs `PDL::Graphics::Cairo` + `giza-server`. |
+| `examples/artifact_remove.pl` | Remove ocular / stereotyped artifacts by GED spatial filter (`PDL::EEG::GED`) or temporal regression (`PDL::EEG::Regress`) and write the recording back (`--output mul|edf`). Classes are declared with one `--ged NAME[:CHANS[:SOURCE]]` per class, in removal order: `NAME` is a kind in the spans file; `CHANS` is an optional signed channel list used only to give the axis a meaning (correlation report, and the `--regress` source), never to build the filter; `SOURCE` is `span` (covariance of the NAME segments, default) or `blink` (peak-normalised blink-evoked covariance, from `--blink-from` or the target's blink segments). Each class builds R from the segments that are not that artifact and not `bad`, keeping every other declared artifact in R so the classes do not disturb one another. Spatial removal is one `apply_ged` oblique projection per class applied in order; `--regress` uses `regress_out` on the class source time courses. `bad` segments are restored verbatim (excluded later at averaging). Before writing, a review image (original-vs-cleaned waveform overlay + one 2D topography per class, needs `--montage`) is rendered and the write confirmed (`--no-review`/`--yes`). `--rank` is a diagnostic-only mode: it ranks every component of each class by eigenvalue with r(vEOG)/r(hEOG)/kurtosis/low-frequency-ratio/`|pattern|` and auto eye-flags, renders a per-component figure (topography + representative-channel waveforms + component time course), and can `--dump-components` the selected component scores as channels. `--eeg/--extra/--eog/--veog/--heog`, `--blink-thresh/-refr/-half`, `--shrink`, `--gap-min`, `--eye-corr`, `--rank-top`. Needs `PDL::Graphics::Cairo` + `PDL::EEG::MAP2D` for the images. |
+| `examples/task_ica_mul.pl` | ICA-based blink + horizontal removal on a continuous recording → full-record `.mul`, via `PDL::EEG::ICA`. |
+| `examples/ged_vs_ica_blink.pl` | Quantitative GED-vs-ICA comparison on blink removal (component identification and residual). |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
 
 ## Quick start
@@ -492,10 +499,83 @@ implementation (`examples/verify_inverse_numpy.py`) to machine precision, and
 eLORETA reproduces the single-point exact-zero-localization result of
 Pascual-Marqui.
 
+## Artifact removal — GED spatial filter, regression, diagnostics
+
+`examples/raw_plot.pl` and `examples/artifact_remove.pl`, with the modules
+`PDL::EEG::Spans`, `PDL::EEG::Regress`, `PDL::EEG::ICA` and the generic
+`ged_operator` / `apply_ged` core of `PDL::EEG::GED`, remove ocular and other
+stereotyped artifacts from a continuous recording and write it back. The
+workflow is: mark intervals, estimate one spatial filter per artifact, remove,
+keep `bad` for later exclusion.
+
+1. **Mark** with `raw_plot.pl` (interactive, over `giza-server`). Each mouse
+   drag adds a time interval under a free-form `--kind`, appended to a
+   `<file>.spans.tsv` sidecar. `bad` marks non-stationary artifact (sweat,
+   movement) that GED cannot filter.
+
+   ```
+   perl -Ilib examples/raw_plot.pl task.edf --kind hsaccade
+   perl -Ilib examples/raw_plot.pl task.edf --kind bad
+   ```
+
+2. **Remove** with `artifact_remove.pl`. Declare one class per artifact with
+   `--ged NAME[:CHANS[:SOURCE]]`, in removal order:
+
+   ```
+   perl -Ilib examples/artifact_remove.pl task.edf \
+       --ged blink:vEOG:blink --blink-from voluntary_blinks.edf \
+       --ged hsaccade:hEOG \
+       --spans task.edf.spans.tsv --montage standard_1020_eog_nose.elc \
+       --output edf --out task-clean.edf
+   ```
+
+   - `NAME` is a kind in the spans file. `SOURCE` is `span` (covariance of the
+     NAME segments, default) or `blink` (peak-normalised blink-evoked
+     covariance, from `--blink-from` or the target's own blink segments).
+   - `CHANS` is an optional signed channel list (e.g. `Fp1,Fp2,-A1,-A2`) used
+     **only** to give the estimated axis a meaning — a correlation report, and
+     the source for `--regress`. It does **not** build the filter, so a wrong
+     or missing `CHANS` never changes what is removed.
+   - Each class builds its reference covariance R from the segments that are
+     **not** that artifact and **not** `bad`, keeping every **other** declared
+     artifact in R. A GED filter is orthogonal (in the R metric) only to what
+     lives in R, so keeping the other artifacts in R is what stops one class's
+     removal from disturbing another.
+   - Spatial removal (default) is one exact `apply_ged` oblique projection per
+     class, applied in the given order. `--regress` instead removes the class
+     source time courses with `PDL::EEG::Regress::regress_out` (stronger, but
+     also removes brain that co-varies in time).
+   - `bad` segments are restored to the recorded samples after removal, to be
+     excluded later at the averaging stage using the same spans file.
+   - Each operator prints its generalized-eigenvalue gap (`lambda_top /
+     lambda_next`); a gap near 1 means the marked segments did not isolate one
+     axis and the filter is unreliable (`--gap-min` warns).
+   - Before writing, a review image (original-vs-cleaned waveform overlay plus
+     one 2D scalp topography per class, with `--montage`) is rendered and the
+     write confirmed on the terminal; `--no-review` / `--yes` skip it.
+
+3. **Diagnose** with `--rank` (does not remove or write). For each class it
+   ranks every component by eigenvalue with r(vEOG), r(hEOG), kurtosis, a
+   low-frequency-power ratio, `|pattern|` and automatic eye-flags
+   (`--eye-corr`), renders one row per selected component (topography +
+   representative-channel waveforms + component time course), and can
+   `--dump-components mul|edf` the selected component scores as channels
+   (arbitrary units, not µV). Identification is deliberately not by eigenvalue
+   rank — the artifact axis is not guaranteed to be the top eigenvalue — but by
+   correlation with a reference and by inspecting the topography.
+
+`PDL::EEG::Regress::regress_out` is usable on its own for classic EOG
+regression (pass the EOG channels as the sources). `PDL::EEG::ICA` provides the
+ICA route for the same ocular cleaning, for comparison against GED.
+
+Layouts: `PDL::EEG::GED`, `Spans`, `Regress` and `artifact_remove.pl` use
+`(nch, nt)`; `PDL::EEG::ICA` uses `(nt, nch)`.
+
+
 ## Tests
 
 ```
-make test        # 17 files (t/06 reserved/skipped), 390 subtests
+make test        # 20 files (t/06 reserved/skipped), 416 subtests
 ```
 
 `t/01_nihonkohden` `t/02_edf` `t/03_ptn` `t/04_signal` `t/05_montage`
@@ -514,6 +594,13 @@ render-free, needs only PDL).
 transpose rejection, MNE operator vs the closed form, sLORETA/eLORETA exact
 single-source localization, CAR multi-source tracking; render-free, needs only
 PDL).
+`t/18_regress` (Regress: both artifact sources removed, brain preserved where
+the artifact is weak, span-invariance/label-free, channel DC preserved,
+cleaned + removed reconstructs the input; render-free, needs only PDL).
+`t/19_spans` (Spans: TSV sidecar round-trip, `spans_to_mask` rasterisation,
+offset/clip edge cases; needs only PDL).
+`t/20_ica` (ICA: whitening, symmetric FastICA source recovery, remove-none
+identity, mixing reconstruction; render-free, needs only PDL).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real

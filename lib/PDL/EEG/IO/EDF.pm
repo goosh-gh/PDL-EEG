@@ -427,12 +427,24 @@ sub write_edf {
             code => (defined $subject_opt ? $subject_opt : $subject_rec),
             sex  => $o{sex}, birthdate => $o{birthdate}, name => $o{name},
         );
-        $recording_fld = _edfplus_recording(
-            _ddmmmyyyy($have_start, $sY, $sM, $sD),
-            admin => (defined $o{recording} ? $o{recording} : $rec->{recording}),
-            tech  => $o{technician},
-            equip => _equip_string($rec, $o{equipment}),
-        );
+        if (!defined $o{recording}
+            && defined $rec->{recording}
+            && $rec->{recording} =~ /^\s*Startdate\b/i) {
+            # $rec->{recording} is already a complete EDF+ recording-id field
+            # (as read_edf returns it verbatim). Pass it through unchanged so a
+            # read -> write round-trip stays EDF+ compliant, instead of stuffing
+            # the whole field into the admin subfield -- which _sub() would
+            # underscore-escape and _edfplus_recording would prefix with a
+            # second "Startdate", yielding a non-compliant double-Startdate field.
+            $recording_fld = $rec->{recording};
+        } else {
+            $recording_fld = _edfplus_recording(
+                _ddmmmyyyy($have_start, $sY, $sM, $sD),
+                admin => (defined $o{recording} ? $o{recording} : $rec->{recording}),
+                tech  => $o{technician},
+                equip => _equip_string($rec, $o{equipment}),
+            );
+        }
     } else {
         $subject_fld   = defined $subject_opt  ? $subject_opt  : ($subject_rec      // '');
         $recording_fld = defined $o{recording} ? $o{recording} : ($rec->{recording} // '');
