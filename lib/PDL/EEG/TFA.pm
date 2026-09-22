@@ -425,4 +425,280 @@ continuous wavelet transform, trial-averaged power and inter-trial
 coherence, and per-frequency baseline normalisation.  Convolution is
 carried out in the frequency domain via C<PDL::FFT>.
 
+=head1 FUNCTIONS
+
+All functions are exported on request only (C<@EXPORT_OK>).
+
+=head2 morlet_wavelet($freq, $sfreq, %opt)
+
+    my ($wr, $wi) = morlet_wavelet(100, 1000, n_cycles => 7);
+
+Complex Morlet wavelet in the "number of cycles" parameterisation:
+
+    sigma_t = n_cycles / (2*pi*freq)            # Gaussian SD, seconds
+    w(t)    = exp(2i*pi*freq*t) * exp(-t^2 / (2*sigma_t^2))
+
+C<$freq> is the centre frequency and C<$sfreq> the sampling rate, both in
+Hz; both must be E<gt> 0 or the function croaks.
+
+Options:
+
+=over 4
+
+=item C<n_cycles> => number (default 7.0)
+
+Wavelet width in cycles.
+
+=item C<sigma_win> => number (default 5.0)
+
+Truncation half-width in units of C<sigma_t>.  The kernel spans
+C<int(sigma_win * sigma_t * sfreq)> samples on each side of t = 0 (at
+least 1).
+
+=back
+
+Returns C<($wr, $wi)>: real and imaginary parts as 1-D piddles of odd
+length, centred on t = 0, normalised to unit L2 energy
+(C<sum($wr**2 + $wi**2) == 1>).  Kernel length shrinks as C<$freq>
+increases.
+
+=head2 cwt_morlet($signal, $sfreq, $freqs, %opt)
+
+    my ($cr, $ci) = cwt_morlet($signal, $sfreq, $freqs, n_cycles => 7);
+
+Continuous Morlet wavelet transform of one real signal.  C<$signal> is
+flattened to 1-D (C<ntime>); C<$freqs> is a 1-D piddle of centre
+frequencies in Hz.
+
+Options:
+
+=over 4
+
+=item C<n_cycles> => number | piddle (nfreq) (default 7.0)
+
+A scalar applies to every frequency; a piddle gives one cycle count per
+frequency and must have C<nfreq> elements (croaks otherwise).
+
+=item C<sigma_win> => number (default 5.0)
+
+Passed to C<morlet_wavelet>.
+
+=back
+
+Each frequency is convolved with its wavelet by zero-padded FFT (length
+rounded up to a power of two) and the central C<ntime> samples of the
+linear convolution are kept ("same" mode).  Because the padding is with
+zeros, coefficients within half a kernel length of either edge are
+affected by the signal boundary.
+
+Returns C<($cr, $ci)>: real and imaginary parts of the complex
+coefficients, each a C<(nfreq, ntime)> double piddle.  A pure tone
+produces its maximum power in the bin at its own frequency
+(F<t/16_tfa.t>).
+
+=head2 tfr_morlet($data, $sfreq, $freqs, %opt)
+
+    my $power = tfr_morlet($epochs, $sfreq, $freqs, n_cycles => 7);
+    my $itc   = tfr_morlet($epochs, $sfreq, $freqs, output => 'itc');
+    my %r     = tfr_morlet($epochs, $sfreq, $freqs, output => 'all');
+
+Trial-averaged Morlet power and related quantities.  C<$data> is a 1-D
+piddle C<(ntime)> for a single trial or a 2-D piddle C<(nepoch, ntime)>.
+Each trial is transformed with C<cwt_morlet>; C<n_cycles> and
+C<sigma_win> are passed through to it.
+
+Options:
+
+=over 4
+
+=item C<n_cycles> => number | piddle (nfreq) (default 7.0)
+
+=item C<sigma_win> => number (default 5.0)
+
+=item C<output> => string (default C<'power'>)
+
+One of the following.  With C<c> the complex coefficient of one trial
+and C<mean> the mean across trials:
+
+=over 4
+
+=item C<'power'>
+
+C<(nfreq, ntime)>: C<mean(|c|^2)>, total power.
+
+=item C<'itc'>
+
+C<(nfreq, ntime)>: C<|mean(c / |c|)|>, inter-trial coherence.  A
+coefficient with zero magnitude contributes 0 to the sum.
+
+=item C<'evoked'>
+
+C<(nfreq, ntime)>: C<|mean(c)|^2>, phase-locked power.
+
+=item C<'induced'>
+
+C<(nfreq, ntime)>: C<power - evoked>, non-phase-locked power; negative
+values (rounding) are clamped to 0.
+
+=item C<'complex'>
+
+C<($er, $ei)>: real and imaginary parts of C<mean(c)>, each
+C<(nfreq, ntime)>.
+
+=item C<'all'>
+
+A flat hash (list) with keys C<power>, C<itc>, C<evoked>, C<induced>,
+C<evoked_r>, C<evoked_i>, the last two being the parts of C<mean(c)>.
+
+=back
+
+=back
+
+Verified in F<t/16_tfa.t>: a Gaussian burst peaks at its own frequency
+and time; ITC exceeds 0.9 for phase-locked trials and stays below 0.5
+for random-phase trials; C<power == evoked + induced> to rounding
+error.
+
+=head2 tfr_superlet($data, $sfreq, $freqs, %opt)
+
+    my $power = tfr_superlet($epochs, $sfreq, $freqs,
+                             base_cycles => 3, order_min => 1, order_max => 6);
+
+Trial-averaged multiplicative superlet power (Moca et al. 2021).
+C<$data> is a 1-D piddle C<(ntime)> for a single trial or a 2-D piddle
+C<(nepoch, ntime)>.
+
+For each frequency C<f> and order C<o = 1 .. order(f)>, a Morlet wavelet
+with C<n_cycles = base_cycles * o> is applied (via C<morlet_wavelet> and
+the same FFT convolution as C<cwt_morlet>); the superlet power at C<f>
+is the geometric mean of the C<order(f)> individual powers.  Individual
+powers are floored at 1e-300 before taking the logarithm.  The result is
+averaged across trials.
+
+Options:
+
+=over 4
+
+=item C<base_cycles> => number (default 3)
+
+Cycle count of the order-1 wavelet.
+
+=item C<order> => integer (default undef)
+
+Fixed order for every frequency.  When given, C<order_min>/C<order_max>
+are ignored.
+
+=item C<order_min>, C<order_max> => integer (defaults 1, 5)
+
+Adaptive order: interpolated linearly from C<order_min> at
+C<$freqs-E<gt>at(0)> to C<order_max> at the last element of C<$freqs>,
+rounded to the nearest integer.  C<$freqs> is therefore expected to be
+ascending; if the last element is not greater than the first, the span
+is taken as 1 Hz.
+
+=item C<sigma_win> => number (default 5.0)
+
+Passed to C<morlet_wavelet>.
+
+=back
+
+Every order is clamped to at least 1.  Returns a C<(nfreq, ntime)>
+power piddle.  Only power is produced (no ITC / evoked / induced
+variants).  Cost is roughly C<mean(order)> times that of
+C<tfr_morlet> with C<output =E<gt> 'power'>.
+
+=head2 tfr_stat($data, $sfreq, $freqs, $times, $baseline, %opt)
+
+    my %s = tfr_stat($epochs, $sfreq, $freqs, $times, [-0.05, -0.004],
+                     n_cycles => 7);
+    # $s{z}, $s{mean}, $s{sem} : (nfreq, ntime);  $s{n} : nepoch
+
+Across-trial reliability of Morlet power, accumulated per trial without
+storing single-trial maps.  C<$data> is C<(nepoch, ntime)> (a 1-D piddle
+is treated as one trial); C<$times> is a C<(ntime)> piddle in seconds
+aligned with the time axis; C<$baseline> is C<[t0, t1]> in seconds,
+either bound may be C<undef> to extend to the edge of C<$times>.
+Croaks if the baseline window selects no samples.
+
+For each trial the power C<|c|^2> from C<cwt_morlet> is computed, the
+mean over the baseline samples is subtracted per frequency, and the sum
+and sum of squares of the corrected power are accumulated.  Then
+
+    mean = S1 / n
+    var  = (S2 - S1^2 / n) / (n - 1)      # floored at 1e-300
+    sem  = sqrt(var / n)
+    z    = mean / sem
+
+Because the variance divides by C<n - 1>, at least two trials are
+required for a meaningful result.
+
+C<%opt> is passed through to C<cwt_morlet> (C<n_cycles>, C<sigma_win>).
+
+Returns a hash with keys C<z>, C<mean>, C<sem> (each C<(nfreq, ntime)>)
+and C<n> (the trial count).
+
+This differs from C<apply_baseline(..., mode =E<gt> 'zscore')>: that
+normalises the already trial-averaged map by the standard deviation
+B<over time> within the baseline window, whereas C<tfr_stat> divides the
+trial-averaged, baseline-corrected power by its standard error B<across
+trials>.
+
+=head2 apply_baseline($power, $times, $baseline, %opt)
+
+    my $z = apply_baseline($power, $times, [-0.05, -0.004], mode => 'zscore');
+
+Per-frequency baseline normalisation of a C<(nfreq, ntime)> power map.
+C<$times> is a C<(ntime)> piddle in seconds aligned with the time axis;
+C<$baseline> is C<[t0, t1]> in seconds, either bound may be C<undef> to
+extend to the edge of C<$times>.  Croaks if the window selects no
+samples.
+
+Let C<m> be the mean of C<$power> over the baseline samples, computed
+separately for each frequency.
+
+Options:
+
+=over 4
+
+=item C<mode> => string (default C<'zscore'>)
+
+=over 4
+
+=item C<'zscore'>
+
+C<(power - m) / sd>, where C<sd> is the standard deviation over the
+baseline samples (divisor C<n_baseline>, not C<n_baseline - 1>); a zero
+C<sd> is replaced by 1.
+
+=item C<'ratio'>
+
+C<power / m>
+
+=item C<'logratio'>
+
+C<log10(power / m)>
+
+=item C<'percent'>
+
+C<(power - m) / m>
+
+=item C<'mean'>
+
+C<power - m>
+
+=back
+
+Any other value croaks.
+
+=back
+
+Returns a new C<(nfreq, ntime)> piddle; C<$power> is not modified.
+Verified in F<t/16_tfa.t>: the C<zscore> output averages to ~0 over
+the baseline window, and every mode runs on a burst map without
+producing BAD values.
+
+=head1 SEE ALSO
+
+F<t/16_tfa.t>, F<examples/sep_hfo_tfa.pl>.
+
 =cut

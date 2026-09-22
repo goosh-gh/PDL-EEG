@@ -1,5 +1,44 @@
 Revision history for PDL-EEG
 
+0.05  (unreleased)
+  ADDED
+    - PDL::EEG::GED: generic GED spatial filter (ged_cov / ged_operator /
+      apply_ged; S w = lambda R w via PDL::LinearAlgebra sygvd, R-orthonormal
+      filters, biorthogonal patterns A = R W, shrinkage regularisation on R)
+      and a vEOG-guided blink workflow (detect_blinks / blink_free /
+      blink_evoked / fit_blink / remove_blinks). Single blink component only.
+    - PDL::EEG::Regress: regress_out() -- temporal nuisance / EOG regression.
+    - PDL::EEG::Spans: time-interval span annotations, .spans.tsv sidecar,
+      spans_to_mask / kinds_present.
+    - PDL::EEG::ICA: pure-PDL symmetric FastICA (whiten / fastica /
+      ica_decompose / identify_by_reference / apply_ica / ica_operator).
+    - examples: blink_ged_clean.pl (GED blink removal, .edf/.mul output),
+      artifact_remove.pl (multi-class GED / regression removal with per-artifact
+      reference covariance, review image, --rank diagnostic), raw_plot.pl
+      (interactive span annotator), task_ica_mul.pl (ICA blink + horizontal
+      removal -> .mul), ged_vs_ica_blink.pl (GED-vs-ICA comparison).
+    - t/18_ged.t, t/19_regress.t, t/20_spans.t, t/21_ica.t (synthetic,
+      render-free).
+    - PDL::EEG::TFA POD: FUNCTIONS section documenting all six exported
+      functions (morlet_wavelet, cwt_morlet, tfr_morlet, tfr_superlet,
+      tfr_stat, apply_baseline) from the implementation and t/16_tfa.t.
+  FIXED
+    - NihonKohden wfmblock: channel-table off-by-one (electrode code was read
+      from the first byte of the next record). Contiguous 10-20 codes were
+      unaffected; every aux channel was shifted by one. Labels only, data
+      untouched. extblock path unchanged.
+    - EDF write_edf: an EDF+ recording-identification field already starting
+      with "Startdate" (as read_edf returns it) is passed through verbatim
+      instead of being re-wrapped, which had produced a double-"Startdate"
+      header rejected by EDFBrowser.
+    - per-module $VERSION removed from GED, ICA, Regress, Spans (added after
+      0.04 with their own version strings; the single source is lib/PDL/EEG.pm).
+  DOCS
+    - Nihon Kohden docs consolidated under doc/ (docs/ retired):
+      NihonKohden.md overview, NK_block_layouts.md/.ja.md, NK_extblock.md,
+      NK_files.md.
+    - README: new modules, examples, artifact-removal workflow, tests.
+
 0.04  2026-09-02
     - version consolidated to a single source (lib/PDL/EEG.pm); per-module $VERSION removed
     - MAP2D::plot_topomap: head_extent option (grow the head circle toward the
