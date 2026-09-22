@@ -25,7 +25,6 @@ use warnings;
 use PDL;
 use Exporter 'import';
 our @EXPORT_OK = qw(regress_out);
-our $VERSION = '0.01';
 
 # regress_out($X, @sources) -> $cleaned  (or ($cleaned,$removed) in list ctx)
 #   $X       : (nch, nt)

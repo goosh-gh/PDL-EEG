@@ -24,8 +24,6 @@ use PDL;
 use PDL::LinearAlgebra qw(msymgeigen);
 use Exporter 'import';
 
-# Version is kept in lockstep with the distribution root, PDL::EEG (EEG.pm).
-our $VERSION = '0.04';
 our @EXPORT_OK = qw(
     ged_cov ged_operator apply_ged
     detect_blinks blink_free blink_evoked fit_blink remove_blinks

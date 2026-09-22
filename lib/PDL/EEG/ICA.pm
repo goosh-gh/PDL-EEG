@@ -5,7 +5,6 @@ use PDL;
 use PDL::MatrixOps;
 use Exporter 'import';
 
-our $VERSION = '0.01';
 our @EXPORT_OK = qw(
     whiten fastica ica_decompose
     identify_by_reference apply_ica ica_operator

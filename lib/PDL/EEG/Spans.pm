@@ -19,7 +19,6 @@ use warnings;
 use PDL;
 use Exporter 'import';
 our @EXPORT_OK = qw(read_spans write_spans spans_to_mask kinds_present);
-our $VERSION   = '0.01';
 
 sub write_spans {
     my ($path, $spans) = @_;
