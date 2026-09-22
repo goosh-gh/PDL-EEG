@@ -34,6 +34,9 @@ Revision history for PDL-EEG
     - per-module $VERSION removed from GED, ICA, Regress, Spans (added after
       0.04 with their own version strings; the single source is lib/PDL/EEG.pm).
   DOCS
+    - README.md: 85 lines that had been double-encoded in 0.04 (UTF-8 bytes
+      re-read as Latin-1 and re-encoded, so "—" rendered as "â" plus control
+      characters) restored to the pre-0.04 text; no other line touched.
     - Nihon Kohden docs consolidated under doc/ (docs/ retired):
       NihonKohden.md overview, NK_block_layouts.md/.ja.md, NK_extblock.md,
       NK_files.md.
