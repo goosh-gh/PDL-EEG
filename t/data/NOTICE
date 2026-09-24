@@ -1,0 +1,57 @@
+Third-party data in t/data
+==========================
+
+standard_1020_subset.elc
+------------------------
+28 positions (LPA, RPA, Nz, the 19 standard 10-20 electrodes, Fpz, Oz,
+M1, M2, A1, A2) extracted without modification from
+
+    fieldtrip/template/electrode/standard_1020.elc
+    https://github.com/fieldtrip/fieldtrip
+    commit 0b62f10a09dc589e5262992f341614a6737f0805 (2011-05-10)
+
+The coordinate values are identical to those in that file, which is also
+the file shipped with MNE-Python as
+mne/channels/data/montages/standard_1020.elc.
+
+Copyright Robert Oostenveld and the FieldTrip contributors.
+Licensed under GPL-3.0-or-later.
+
+The electrode positions are defined in:
+    Oostenveld R, Praamstra P (2001) The five percent electrode system
+    for high-resolution EEG and ERP measurements.
+    Clinical Neurophysiology 112:713-719.
+
+standard_1020_eog_nose.elc
+--------------------------
+37 positions from three sources:
+
+  - The 19 standard 10-20 electrodes (T3/T4/T5/T6 naming) and the three
+    fiducials LPA, RPA, Nz: the New York Head electrode coordinates
+    (sa/locs_3D_orig), in MNI mm. All 22 are identical to the values
+    dumped by examples/dump_nyhead19.pl.
+    Iz, Fpz and Oz are in the same coordinate style and their labels are
+    in the New York Head channel list, but they are not in that dump and
+    have not been checked against it directly.
+
+    The New York Head:
+        https://www.parralab.org/nyhead/
+    Copyright (C) 2015 Yu Huang, Lucas C. Parra and Stefan Haufe.
+    Licensed under GPL-3.0-or-later.
+        Huang Y, Parra LC, Haufe S (2016) The New York Head - a precise
+        standardized volume conductor model for EEG source localization
+        and tES targeting. NeuroImage 140:150-162.
+
+  - M1, M2, A1, A2: from the FieldTrip file cited above, unmodified.
+
+  - X1, hEOG, lhEOG, lvEOG, rhEOG, rvEOG, vEOG and nose: coordinates
+    chosen by the author on the New York Head scalp mesh.
+
+Licensing
+---------
+Both .elc files above are distributed under GPL-3.0-or-later, because
+they contain coordinates taken from FieldTrip and, in the case of
+standard_1020_eog_nose.elc, from the New York Head, both of which are
+GPL-3.0-or-later. This is separate from the
+license of the PDL::EEG distribution itself, which is perl_5 (the same
+terms as Perl itself; see Makefile.PL).

@@ -33,7 +33,11 @@ Revision history for PDL-EEG
       header rejected by EDFBrowser.
     - per-module $VERSION removed from GED, ICA, Regress, Spans (added after
       0.04 with their own version strings; the single source is lib/PDL/EEG.pm).
+    - t/15_map2d.t: read the tracked fixture t/data/standard_1020_subset.elc,
+      so the test runs on a clean clone instead of being skipped.
   DOCS
+    - t/data/NOTICE: provenance and license (GPL-3.0-or-later) of the two .elc
+      fixtures (FieldTrip, New York Head).
     - README.md: 85 lines that had been double-encoded in 0.04 (UTF-8 bytes
       re-read as Latin-1 and re-encoded, so "—" rendered as "â" plus control
       characters) restored to the pre-0.04 text; no other line touched.

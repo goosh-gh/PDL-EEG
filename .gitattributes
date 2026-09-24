@@ -7,3 +7,6 @@ t/data/** binary
 *.21E  binary
 *.bam  binary
 *.CN3  binary
+
+# ...but the provenance note is plain text
+t/data/NOTICE text diff

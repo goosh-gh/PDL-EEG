@@ -1,6 +1,7 @@
 use strict;
 use warnings;
 use Test::More;
+use FindBin qw($Bin);
 use PDL;
 use PDL::EEG::MAP2D qw(project_positions interpolate_topo);
 use PDL::EEG::IO::ASA ();
@@ -8,7 +9,7 @@ use PDL::EEG::IO::ASA ();
 # Numeric core only (projection + thin-plate spline); no rendering, so
 # PDL::Graphics::Cairo is not required for this test.
 
-my $elc = 't/data/standard_1020.elc';
+my $elc = "$Bin/data/standard_1020_subset.elc";
 plan skip_all => "$elc not found" unless -r $elc;
 
 my $mon = PDL::EEG::IO::ASA::read_elc($elc);
