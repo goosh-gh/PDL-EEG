@@ -32,6 +32,7 @@ eye-blink artifacts (GED), and export to EDF/EDF+ or BESA ASCII multiplexed
 | `PDL::EEG::ICA` | Symmetric FastICA in pure PDL (no LAPACK: whitening and the symmetric orthogonalization use `PDL::MatrixOps` `eigens_sym`). `ica_decompose` returns unmixing/mixing matrices and component activations; `identify_by_reference` scores each component against a reference channel (e.g. vEOG); `apply_ica` reconstructs with a chosen component subset removed. Data layout `(nt, nch)`. Built to compare ICA-based ocular cleaning against `PDL::EEG::GED`. |
 | `PDL::EEG::Spans` | Time-interval annotations shared between the viewer and the artifact remover. A span is `{kind,t0,t1}` in seconds; `read_spans`/`write_spans` persist them to a `<file>.spans.tsv` sidecar; `spans_to_mask` rasterises one `kind` to a per-sample byte mask; `kinds_present` lists the kinds present. `kind` is free-form (`blink`, `hsaccade`, `bad`, or any GED class name). |
 | `PDL::EEG::Regress` | Temporal nuisance / EOG regression. `regress_out($X, @sources)` removes, from every channel of `$X` (nch,nt), the least-squares fit on a set of source time courses (GED or ICA component activations, or raw EOG channels — with EOG channels it is classic Gratton–Coles regression). Sources are orthonormalised first, so correlated sources are partialled out jointly and the removal depends only on the span of the sources, not on labelling any one vertical/horizontal. Channel DC is preserved. Pure PDL. |
+| `PDL::EEG::Heartbeat` | R-peak detection and R-locked averaging. `zp_butter` is a zero-phase Butterworth high-/low-/band-pass applied in the frequency domain (squared-magnitude response of the digital Butterworth filter, odd-reflection padding); `detect_r($ecg,$fs)` returns R-peak sample indices and R polarity (5–20 Hz band, percentile threshold, 0.30 s minimum distance, ±40 ms refinement on the 0.5 Hz high-passed signal); `beat_epochs` cuts `(nch,nep,nbeat)`; `beat_average` gives the R-locked mean or median, across-beat SD and per-channel beat count, with optional per-beat baseline and per-channel peak-to-peak rejection; `surrogate_r` displaces every R index by a seeded random offset (non-heartbeat time points); `bn_balance($bn1,$bn2)` returns the weight `w` minimising the energy of `w*bn1 + (1-w)*bn2`. Layout `(nch, nt)`. Pure PDL (`PDL::FFT`). |
 ## Command-line tools
 
 | Tool | Role |
@@ -70,6 +71,9 @@ eye-blink artifacts (GED), and export to EDF/EDF+ or BESA ASCII multiplexed
 | `examples/task_ica_mul.pl` | ICA-based blink + horizontal removal on a continuous recording → full-record `.mul`, via `PDL::EEG::ICA`. |
 | `examples/ged_vs_ica_blink.pl` | Quantitative GED-vs-ICA comparison on blink removal (component identification and residual). |
 | `xt/70_real_data.t` | Real-data event-placement regression (`extblock` + `wfmblock`); pass `.EEG` paths after `::` |
+| `examples/heartbeat_bne_survey.pl` | R-locked survey of a recording with two balanced non-cephalic electrodes (`--bn1/--bn2`, each against the system reference). R peaks are detected on BN1−BN2. Prints (1) P/R/T amplitude ± SE of every channel at the latencies where BN1−BN2 peaks, (2) the weight r minimising `r*BN1 + (1-r)*BN2` in the P, QRS and T windows (with odd/even-beat values and the residual each r leaves in each window), (3) for six references of the scalp channels (system, average, A1+A2, BN r=0.5, BN r=r_QRS, BN r=r_T) the RMS over scalp channels of the QRS peak-to-peak and of the mean amplitude in the T, 200–300, 300–450 and 450–600 ms windows, next to the same measures at `--nsurr` sets of non-heartbeat time points. Writes `PREFIX_avg_<ref>.tsv` and, with `PDL::Graphics::Cairo` + `PDL::EEG::MAP2D`, `PREFIX_bn.png`, `PREFIX_scalp.png` and P/R/T scalp maps for the system and average references. `--skip`, `--band`, `--reject`, `--seed`, `--montage`, `--no-fig`. |
+| `examples/heartbeat_hep_scalp.pl` | R-locked scalp maps in the reference the channels were recorded in, tested against non-heartbeat time points. R peaks on BN1−BN2. For the R sample and each `--windows` latency window it prints the map in µV and as z (amplitude / SD over `--nsurr` non-heartbeat averages), Σz² over scalp channels with its rank among the non-heartbeat sets, max \|z\| against the non-heartbeat 95th percentile of max \|z\| and the channels above it, the correlation of the z maps from the first and second half of the beats, the cosine with the map at R, and the share of the map fitted by `a_c*BN1 + b_c*BN2` with coefficients estimated per channel in the QRS window or in `--bnwin` (with the share that fit takes from non-heartbeat averages, and Σz² of what is left). Writes `PREFIX_maps.tsv`, `PREFIX_time.tsv` and, with `PDL::Graphics::Cairo` + `PDL::EEG::MAP2D`, `PREFIX_wave.png` (all scalp channels, RMS against the non-heartbeat 95th percentile, Fz/Cz/Pz with BN1−BN2) and `PREFIX_maps.png` (maps per window: µV, z, µV after each BN fit). |
+| `examples/heartbeat_joint.pl` | Draw a tab-separated average (`time_ms` + one column per channel, e.g. the `PREFIX_avg_<ref>.tsv` of `heartbeat_bne_survey.pl`) with `PDL::EEG::MAP2D::plot_joint`: all channels coloured by electrode position with scalp maps above them at the latencies given by `--times` (or by `@TIMES` at the top of the script) and, inside the waveform panel, a small head whose dots give the colour of each electrode's trace. `--xlim`, `--ylim`, `--clim`, `--positive-up`, `--nave`, `--title`, `--montage`, `--out`. |
 
 ## Quick start
 
@@ -356,6 +360,29 @@ Per-panel labels come from `titles` (default `left` / `axial` / `right`); the
 overall `title` is the figure heading. Per-panel fonts are smaller than the
 single-map defaults because the maps are packed.
 
+### Waveforms with maps at chosen latencies — `plot_joint`
+
+```perl
+use PDL::EEG::MAP2D qw(plot_joint);
+plot_joint(
+    avg => $avg,                 # (nchan, ntime)
+    t   => $t_ms,                # (ntime)
+    labels => \@labels, montage => $elc,
+    times  => [200, 250, 300, 350, 400],
+    nave   => 293, outfile => 'joint.png',
+);
+```
+
+Draws every channel that has a position in the montage as one trace, coloured by
+electrode position (right → red, anterior → blue, superior → green), with a
+scalp map for each entry of `times` above the waveforms and a line from each map
+to its latency. The maps share one symmetric colour scale (`clim`, default the
+largest |amplitude| at the requested latencies); a small head inside the waveform
+panel shows which colour is which electrode. `negative_up` (default 1), `xlim`,
+`ylim`, `unit`, `title`, `time_format`, `key => 0`, `color` (one colour for all
+traces), `width`/`height`. Without `outfile` the figure is returned. Needs
+`PDL::Graphics::Cairo` with `Figure::add_connection` and `add_text`.
+
 ### Text and colour-bar knobs
 
 `names => 1` labels the sensors; `name_size` (default 10) sizes those labels,
@@ -601,6 +628,14 @@ cleaned + removed reconstructs the input; render-free, needs only PDL).
 offset/clip edge cases; needs only PDL).
 `t/20_ica` (ICA: whitening, symmetric FastICA source recovery, remove-none
 identity, mixing reconstruction; render-free, needs only PDL).
+`t/22_heartbeat` (Heartbeat: `zp_butter` against scipy `filtfilt` values and the
+analytic gain, `detect_r` against the reference R samples in both polarities,
+`beat_epochs`/`beat_average` against explicit sums incl. baseline, rejection and
+median, `surrogate_r` seeding and bounds, `bn_balance` closed form; deterministic,
+needs only PDL).
+`t/23_joint` (MAP2D `plot_joint`: renders with and without `outfile`, one
+connection per latency, panel count, argument checks; skipped without
+`PDL::Graphics::Cairo` providing `Figure::add_connection` and `add_text`).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real

@@ -13,6 +13,7 @@ use PDL::EEG::IO::ASA ();
 our @EXPORT_OK = qw(
     plot_topomap
     plot_topomap_panels
+    plot_joint
     project_positions
     interpolate_topo
 );
@@ -770,7 +771,7 @@ sub plot_topomap_panels {
     $cax->imshow(cat($cr,$cg,$cb)->xchg(0,1), origin => 'lower');
     $cax->set_aspect('auto'); $cax->set_xticks(pdl([])); $cax->set_yticks(pdl([]));
     $cax->xlim(0,1);
-    my $xr = $a{cbar_label_x} // 3.4;
+    my $xr = $a{cbar_label_x} // 2.0;
     my %al = (ha=>'center', halign=>'center', va=>'center', valign=>'center');
     $cax->text($xr, $nb-1.5,     sprintf('%.1f',$hi), fontsize=>($a{cbar_size} // 9), %al);
     $cax->text($xr, ($nb-1)/2,   '0',                 fontsize=>($a{cbar_size} // 9), %al);
@@ -786,6 +787,151 @@ sub plot_topomap_panels {
                    gnuplot=>'gnuplot', qt=>'gnuplot', x11=>'gnuplot');
         $fig->show(backend => ($map{$dev} // $dev));
     }
+    return $a{outfile} ? $a{outfile} : $fig;
+}
+
+# ---------------------------------------------------------------------------
+# plot_joint - butterfly plot of every channel with scalp maps at chosen
+# latencies above it, each map tied to its latency by a line.
+#
+#   plot_joint(
+#       avg     => $avg,            # (nchan, ntime)
+#       t       => $t_ms,           # (ntime) latency of each sample
+#       labels  => \@labels,
+#       montage => $elc,
+#       times   => [200, 250, 300], # latencies of the maps, same unit as t
+#       outfile => 'joint.png',
+#   );
+#
+# Each trace is coloured by its electrode position (right -> red, anterior ->
+# blue, superior -> green) and the same colours mark the electrodes in the small
+# head inside the waveform panel. All maps share one symmetric colour scale.
+# Needs PDL::Graphics::Cairo with Figure::add_connection and add_text.
+# ---------------------------------------------------------------------------
+sub plot_joint {
+    my %a = @_;
+    require PDL::Graphics::Cairo;
+    PDL::Graphics::Cairo->import(qw(figure));
+
+    my $avg    = $a{avg}    // croak "plot_joint: 'avg' (nchan,ntime) required";
+    my $t      = $a{t}      // croak "plot_joint: 't' (ntime) required";
+    my $labels = $a{labels} // croak "plot_joint: 'labels' arrayref required";
+    my @times  = @{ $a{times} // croak "plot_joint: 'times' arrayref required" };
+    croak "plot_joint: avg must be (nchan,ntime)" unless $avg->ndims == 2;
+    croak "plot_joint: avg/labels/t size mismatch"
+        unless $avg->dim(0) == @$labels && $avg->dim(1) == $t->nelem;
+    my $mon = ref($a{montage}) ? $a{montage}
+            : PDL::EEG::IO::ASA::read_elc($a{montage}
+                  // croak "plot_joint: 'montage' (.elc path or read_elc hash) required");
+    croak "plot_joint: Figure::add_connection / add_text not available in this PDL::Graphics::Cairo"
+        unless PDL::Graphics::Cairo::Figure->can('add_connection') && PDL::Graphics::Cairo::Figure->can('add_text');
+
+    # ---- channels with a position; their colours ---------------------------
+    my (@use, @xyz);
+    for my $i (0 .. $#$labels) {
+        my $name = $labels->[$i];
+        next if _is_fiducial($name) || _is_periph($name);
+        my $al = $ALIAS{uc $name};
+        my $p  = $mon->{pos}{$name} // ($al ? $mon->{pos}{$al} : undef) or next;
+        push @use, $i; push @xyz, [ $p->{x}, $p->{y}, $p->{z} ];
+    }
+    croak "plot_joint: no channels matched the montage" unless @use;
+    my $N      = scalar @use;
+    my $coords = pdl(\@xyz);                                     # (3, N)
+    my $nrm    = sub { my $v = shift; my ($lo, $hi) = $v->minmax; $hi > $lo ? ($v - $lo) / ($hi - $lo) : $v * 0 + 0.5 };
+    my ($cx, $cy, $cz) = map { $nrm->($coords->slice("($_),:")) } 0 .. 2;
+    my @col = map { [ 0.9 * $cx->at($_), 0.6 * $cz->at($_), 0.9 * $cy->at($_) ] } 0 .. $N - 1;
+    @col = map { $a{color} } 0 .. $N - 1 if defined $a{color};
+    my $V   = $avg->dice_axis(0, pdl(long, \@use));              # (N, ntime)
+    my @lab = @{$labels}[@use];
+
+    # ---- sample of each requested latency, colour scale ---------------------
+    my @ti   = map { ($t - $_)->abs->minimum_ind->sclr } @times;
+    my $clim = $a{clim} // $V->dice_axis(1, pdl(long, \@ti))->abs->max->sclr;
+    $clim = 1e-6 if !ref $clim && $clim <= 0;
+    my ($lo, $hi) = ref $clim ? @$clim : (-$clim, $clim);
+    my $unit = $a{unit} // 'uV';
+    my $n    = scalar @times;
+
+    # the layout fractions below are tuned for this size; fewer maps keep the width
+    my $fig = figure(width => ($a{width} // ($n > 10 ? 95 * $n + 150 : 1100)), height => ($a{height} // 560));
+    my $gsm = $fig->add_gridspec(1, $n, left => 0.07, right => 0.855, top => 0.88, bottom => 0.66, wspace => 0.05);
+    # colour bar: its own cell, wide and tall enough to leave a bar inside the axes margins
+    my $gsc = $fig->add_gridspec(1, 1, left => 0.865, right => 0.93, top => 0.93, bottom => 0.60);
+    my $gsw = $fig->add_gridspec(1, 1, left => 0.02, right => 0.93, top => 0.64, bottom => 0.01);
+
+    # ---- waveform panel -----------------------------------------------------
+    my $wax = $fig->add_subplot($gsw->at(0, 0));
+    $wax->line($t, $V->slice("($_)"), color => $col[$_], lw => ($a{lw} // 0.9)) for 0 .. $N - 1;
+    my ($x0, $x1) = $a{xlim} ? @{ $a{xlim} } : ($t->min, $t->max);
+    my ($y0, $y1) = $a{ylim} ? @{ $a{ylim} } : do { my $m = 1.05 * $V->abs->max; (-$m, $m) };
+    $wax->xlim($x0, $x1);
+    $wax->set_ylim($y0, $y1);
+    my $neg_up = $a{negative_up} // 1;
+    $wax->invert_yaxis if $neg_up;
+    $wax->clip_pad_top(0) if $wax->can('clip_pad_top');
+    $wax->axhline(0, color => '#999999', lw => 0.5);
+    $wax->axvline($_, color => '#888888', lw => 0.9) for @times;
+    $wax->set_xlabel($a{xlabel} // 'time [ms]');
+    $wax->set_ylabel($unit . ($neg_up ? ' (negative up)' : ''));
+    $fig->add_text(text => "N = $a{nave}", ax => $wax, xy => [1, 1], coords => 'axes',
+                   ha => 'right', va => 'bottom', offset => [0, -3], fontsize => 10)
+        if defined $a{nave};
+
+    # ---- maps, each tied to its latency -------------------------------------
+    for my $k (0 .. $n - 1) {
+        my $max = $fig->add_subplot($gsm->at(0, $k));
+        plot_topomap(values => $V->slice(":,($ti[$k])"), labels => \@lab, montage => $mon,
+                     clim => [$lo, $hi], contours => ($a{contours} // 0), names => 0,
+                     sensor_size => ($a{sensor_size} // 3), title => '',
+                     _ax => $max, _fig => $fig, colorbar => 0);
+        my $res = $a{res} // 220;
+        $max->text($res / 2, $res * 1.0, sprintf($a{time_format} // '%g ms', $times[$k]),
+                   ha => 'center', halign => 'center', va => 'bottom', valign => 'bottom',
+                   fontsize => ($a{title_size} // 10), color => 'black');
+        $fig->add_connection(axA => $max, xyA => [0.5, 0.03], coordsA => 'axes',
+                             axB => $wax, xyB => [$times[$k], 1], coordsB => ['data', 'axes'],
+                             color => '#888888', lw => 0.9);
+    }
+
+    # ---- shared colour bar --------------------------------------------------
+    {
+        my $cax = $fig->add_subplot($gsc->at(0, 0));
+        my $nb  = 64;
+        my $cf  = (sequence($nb) / ($nb - 1)) * ($hi - $lo) + $lo;
+        my ($cr, $cg, $cb) = _colorize($cf->dummy(0, 1), $lo, $hi);
+        $cax->imshow(cat($cr, $cg, $cb)->xchg(0, 1), origin => 'lower');
+        $cax->set_aspect('auto'); $cax->set_xticks(pdl([])); $cax->set_yticks(pdl([]));
+        $cax->xlim(0, 1);
+        my %lb = (ax => $cax, coords => 'axes', ha => 'left', va => 'middle', offset => [5, 0],
+                  fontsize => ($a{cbar_size} // 9));
+        $fig->add_text(%lb, xy => [1, 1],   text => sprintf('%.1f', $hi));
+        $fig->add_text(%lb, xy => [1, 0.5], text => sprintf('%g', ($lo + $hi) / 2));
+        $fig->add_text(%lb, xy => [1, 0],   text => sprintf('%.1f', $lo));
+        $cax->set_title($unit, fontsize => ($a{cbar_size} // 9));
+    }
+
+    # ---- electrode colour key inside the waveform panel ---------------------
+    if ($a{key} // 1) {
+        my ($px, $py) = project_positions($coords, margin => 0.20);
+        # default: an 85 px square in the top-left corner of the plot rectangle,
+        # whatever the figure size. Offsets are from the waveform panel's cell;
+        # the layout moves the plot rectangle down by 27 px when there is a
+        # figure title, the inset keeps its place, hence the two values.
+        my ($cw, $chh) = ($wax->width, $wax->height);
+        my $ktop = defined $a{title} ? 37 : 10;
+        my $kax = $wax->inset_axes($a{key_bounds}
+            // [47 / $cw, 1 - ($ktop + 85) / $chh, 85 / $cw, 85 / $chh]);
+        my $th  = sequence(101) / 100 * 2 * $PI;
+        $kax->line(0.5 * cos($th), 0.5 * sin($th), color => 'black', lw => 0.8);
+        $kax->line(pdl(-0.07, 0, 0.07), pdl(0.495, 0.57, 0.495), color => 'black', lw => 0.8);
+        $kax->scatter(pdl($px->at($_)), pdl($py->at($_)), color => $col[$_], s => 3.5, alpha => 1) for 0 .. $N - 1;
+        $kax->xlim(-0.62, 0.62); $kax->set_ylim(-0.62, 0.62);
+        $kax->set_aspect('equal'); $kax->axis('off');
+    }
+
+    $fig->suptitle($a{title}, fontsize => ($a{title_size} ? $a{title_size} + 2 : 12)) if defined $a{title};
+    $fig->save($a{outfile}) if $a{outfile};
     return $a{outfile} ? $a{outfile} : $fig;
 }
 
