@@ -530,8 +530,8 @@ sub _hull2d {
     my ($x, $y) = @_;
     my @p = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] }
             map { [$x->at($_), $y->at($_)] } 0 .. $x->nelem - 1;
-    my $cr = sub { my ($o,$a,$b)=@_;
-        ($a->[0]-$o->[0])*($b->[1]-$o->[1]) - ($a->[1]-$o->[1])*($b->[0]-$o->[0]) };
+    my $cr = sub { my ($o,$u,$v)=@_;
+        ($u->[0]-$o->[0])*($v->[1]-$o->[1]) - ($u->[1]-$o->[1])*($v->[0]-$o->[0]) };
     my (@lo, @up);
     for my $q (@p)         { pop @lo while @lo>=2 && $cr->($lo[-2],$lo[-1],$q)<=0; push @lo,$q }
     for my $q (reverse @p) { pop @up while @up>=2 && $cr->($up[-2],$up[-1],$q)<=0; push @up,$q }
@@ -565,12 +565,12 @@ sub _load_silhouette {
 }
 
 sub _plot_sagittal {
-    my ($a, $keep, $coords, $Vv, $nmask) = @_;
-    my $view = ($a->{orientation} =~ /right/i) ? 'R'
-             : ($a->{orientation} =~ /left/i)  ? 'L'
+    my ($arg, $keep, $coords, $Vv, $nmask) = @_;
+    my $view = ($arg->{orientation} =~ /right/i) ? 'R'
+             : ($arg->{orientation} =~ /left/i)  ? 'L'
              : 'L';                                  # bare 'sagittal' -> left
     my $sgn  = ($view eq 'R') ? 1 : -1;              # screen_x = sgn * Y
-    my $tol  = $a->{midline_tol} // 20;              # mm; keep midline in both views
+    my $tol  = $arg->{midline_tol} // 20;              # mm; keep midline in both views
 
     my $X = $coords->slice("(0),"); my $Y = $coords->slice("(1),");
     my $Z = $coords->slice("(2),");
@@ -586,8 +586,8 @@ sub _plot_sagittal {
     # silhouette polygon (screen coords): from NYHead polyline if supplied,
     # else a convex hull of the projected sensors, expanded a touch.
     my ($hx, $hy);
-    if ($a->{silhouette}) {
-        my ($sY, $sZ) = _load_silhouette($a->{silhouette});
+    if ($arg->{silhouette}) {
+        my ($sY, $sZ) = _load_silhouette($arg->{silhouette});
         ($hx, $hy) = ($sgn * $sY, $sZ);
     }
     else {
@@ -603,7 +603,7 @@ sub _plot_sagittal {
     # every sensor (+2% margin) - shape-preserving, so it stays a clean head
     # profile instead of spiking out to each stray point.  fit_silhouette => 0
     # to disable.
-    if (defined $a->{fit_silhouette} ? $a->{fit_silhouette} : 1) {
+    if (defined $arg->{fit_silhouette} ? $arg->{fit_silhouette} : 1) {
         my $oi = which(!_in_poly($px, $py, $hx, $hy));
         if ($oi->nelem) {
             my ($ccx, $ccy) = ($hx->avg, $hy->avg);
@@ -623,7 +623,7 @@ sub _plot_sagittal {
     }
 
     # square data window (equal aspect), grid, pixel mapping (mirrors axial)
-    my $res = $a->{res} // 240;
+    my $res = $arg->{res} // 240;
     my ($x0,$x1) = ($hx->min, $hx->max);
     my ($y0,$y1) = ($hy->min, $hy->max);
     my $cx = ($x0+$x1)/2; my $cy = ($y0+$y1)/2;
@@ -636,7 +636,7 @@ sub _plot_sagittal {
     # boundary anchors on an outward-dilated ring (never on a sensor, so the TPS
     # matrix can't go singular), IDW-valued from the sensors, then a lightly
     # regularized TPS solve.
-    my $NB  = $a->{anchors} // 48;
+    my $NB  = $arg->{anchors} // 48;
     my $nh  = $hx->nelem;
     my ($ccx,$ccy) = ($hx->avg, $hy->avg);
     my $ax_r = $ccx + ($hx-$ccx)*1.06;              # anchor ring: 6% outside outline
@@ -671,7 +671,7 @@ sub _plot_sagittal {
 
     # colour limits from the projected sensors (nose included by projection)
     my ($lo,$hi);
-    if (defined $a->{clim}) { ($lo,$hi) = ref($a->{clim}) ? @{$a->{clim}} : (-$a->{clim},$a->{clim}); }
+    if (defined $arg->{clim}) { ($lo,$hi) = ref($arg->{clim}) ? @{$arg->{clim}} : (-$arg->{clim},$arg->{clim}); }
     else { my $m = $vv->abs->max; $m = 1e-6 if $m <= 0; ($lo,$hi) = (-$m,$m); }
 
     my ($R,$G,$B) = _colorize($field,$lo,$hi);
@@ -680,13 +680,13 @@ sub _plot_sagittal {
     my $hwc = cat($R,$G,$B)->xchg(0,1);
 
     # ---- figure / axes (colorbar layout mirrors the axial path) -----------
-    my $want_cbar = $a->{colorbar} // 1;
+    my $want_cbar = $arg->{colorbar} // 1;
     my ($fig,$ax,$cax);
-    if ($a->{_ax}) {                     # embedded in a composite
-        $ax = $a->{_ax}; $fig = $a->{_fig}; $want_cbar = 0;
+    if ($arg->{_ax}) {                     # embedded in a composite
+        $ax = $arg->{_ax}; $fig = $arg->{_fig}; $want_cbar = 0;
     }
     elsif ($want_cbar) {
-        $fig = figure(width => ($a->{width} // 640), height => ($a->{height} // 600));
+        $fig = figure(width => ($arg->{width} // 640), height => ($arg->{height} // 600));
         my $gs = $fig->add_gridspec(1,2, width_ratios=>[20,1],
             left=>0.02, right=>0.82, top=>0.92, bottom=>0.05, wspace=>0.25);
         $ax  = $fig->add_subplot($gs->at(0,0));
@@ -694,12 +694,12 @@ sub _plot_sagittal {
     }
     else {
         ($fig,$ax) = PDL::Graphics::Cairo::subplots(1,1,
-            figsize => [ ($a->{width}//560)/100, ($a->{height}//600)/100 ]);
+            figsize => [ ($arg->{width}//560)/100, ($arg->{height}//600)/100 ]);
     }
     $ax->imshow($hwc, origin=>'lower');
     $ax->set_aspect('equal'); $ax->axis('off');
 
-    my $ncont = $a->{contours} // 6;
+    my $ncont = $arg->{contours} // 6;
     if ($ncont) {
         my $fm = $field->copy;
         my $inmean = $field->flat->where($inside->flat)->avg;
@@ -714,14 +714,14 @@ sub _plot_sagittal {
     my $cxp = $hx->append($hx->slice("0:0")); my $cyp = $hy->append($hy->slice("0:0"));
     $ax->line(pdl(map { $d2px->($cxp->at($_)) } 0..$cxp->nelem-1),
               pdl(map { $d2py->($cyp->at($_)) } 0..$cyp->nelem-1),
-              color => ($a->{outline_color} // 'black'), lw => ($a->{outline_lw} // 1.4));
+              color => ($arg->{outline_color} // 'black'), lw => ($arg->{outline_lw} // 1.4));
 
     # sensors + labels
     $ax->scatter(pdl(map { $d2px->($px->at($_)) } 0..$px->nelem-1),
                  pdl(map { $d2py->($py->at($_)) } 0..$px->nelem-1),
-                 color => ($a->{sensor_color} // '#333333'), s => ($a->{sensor_size} // 9));
-    if ($a->{names}) {
-        my $fs = $a->{name_size} // 10;
+                 color => ($arg->{sensor_color} // '#333333'), s => ($arg->{sensor_size} // 9));
+    if ($arg->{names}) {
+        my $fs = $arg->{name_size} // 10;
         for my $i (0 .. $#lab) {
             my $lx = $d2px->($px->at($i));
             my $w  = 0.6 * $fs * length($lab[$i]);
@@ -730,9 +730,9 @@ sub _plot_sagittal {
                 $lab[$i], fontsize => $fs, color => 'black');
         }
     }
-    my $ttl = $a->{title} // ($view eq 'R' ? 'sagittal (right)' : 'sagittal (left)');
-    if ($a->{_ax}) { $ax->text($res*0.03, $res*0.97, $ttl, ha=>"left", halign=>"left", va=>"top", valign=>"top", fontsize=>($a->{title_size} // 12), color=>"black") if defined $ttl; }
-    else { $fig->suptitle($ttl, fontsize => ($a->{title_size} // 13)) if defined $ttl; }
+    my $ttl = $arg->{title} // ($view eq 'R' ? 'sagittal (right)' : 'sagittal (left)');
+    if ($arg->{_ax}) { $ax->text($res*0.03, $res*0.97, $ttl, ha=>"left", halign=>"left", va=>"top", valign=>"top", fontsize=>($arg->{title_size} // 12), color=>"black") if defined $ttl; }
+    else { $fig->suptitle($ttl, fontsize => ($arg->{title_size} // 13)) if defined $ttl; }
 
     if ($want_cbar) {
         my $nb = 64;
@@ -741,39 +741,39 @@ sub _plot_sagittal {
         my $bar = cat($cr,$cg,$cb)->xchg(0,1);
         $cax->imshow($bar, origin=>'lower'); $cax->set_aspect('auto');
         $cax->set_xticks(pdl([])); $cax->set_yticks(pdl([])); $cax->xlim(0,1);
-        my $xr = $a->{cbar_label_x} // 3.4;
+        my $xr = $arg->{cbar_label_x} // 3.4;
         my %al = (ha=>'center', halign=>'center', va=>'center', valign=>'center');
-        $cax->text($xr, $nb-1.5, sprintf('%.1f',$hi), fontsize=>($a->{cbar_size} // 9), %al);
-        $cax->text($xr, ($nb-1)/2, '0', fontsize=>($a->{cbar_size} // 9), %al);
-        $cax->text($xr, 1.5, sprintf('%.1f',$lo), fontsize=>($a->{cbar_size} // 9), %al);
-        $cax->set_title($a->{unit} // 'uV', fontsize=>($a->{cbar_size} // 9));
+        $cax->text($xr, $nb-1.5, sprintf('%.1f',$hi), fontsize=>($arg->{cbar_size} // 9), %al);
+        $cax->text($xr, ($nb-1)/2, '0', fontsize=>($arg->{cbar_size} // 9), %al);
+        $cax->text($xr, 1.5, sprintf('%.1f',$lo), fontsize=>($arg->{cbar_size} // 9), %al);
+        $cax->set_title($arg->{unit} // 'uV', fontsize=>($arg->{cbar_size} // 9));
     }
 
-    return ($lo, $hi) if $a->{_ax};      # embedded: caller draws the shared colorbar
-    $fig->save($a->{outfile}) if $a->{outfile};
-    my $dev = lc($a->{device} // $a->{backend} // 'png');
+    return ($lo, $hi) if $arg->{_ax};      # embedded: caller draws the shared colorbar
+    $fig->save($arg->{outfile}) if $arg->{outfile};
+    my $dev = lc($arg->{device} // $arg->{backend} // 'png');
     if ($dev ne 'png') {
         my %map = (osx=>'gs',aqua=>'gs',cocoa=>'gs',gs=>'gs',giza=>'gs',
                    gnuplot=>'gnuplot',qt=>'gnuplot',x11=>'gnuplot');
         $fig->show(backend => ($map{$dev} // $dev));
     }
-    return $a->{outfile} ? $a->{outfile} : (wantarray ? ($fig,$ax) : $fig);
+    return $arg->{outfile} ? $arg->{outfile} : (wantarray ? ($fig,$ax) : $fig);
 }
 
 # --- composite panels (e.g. sagittal-left | axial | sagittal-right) ---------
 # One figure, several views sharing a single colour scale and colorbar.  Each
 # view is drawn by plot_topomap into a supplied axes (the _ax/_fig hook).
 sub _resolve_vals {
-    my $a = shift;
-    if (defined $a->{values}) {
-        return (ref($a->{values}) && eval { $a->{values}->isa('PDL') })
-            ? $a->{values}->flat : pdl(@{ $a->{values} });
+    my $arg = shift;
+    if (defined $arg->{values}) {
+        return (ref($arg->{values}) && eval { $arg->{values}->isa('PDL') })
+            ? $arg->{values}->flat : pdl(@{ $arg->{values} });
     }
-    elsif (defined $a->{avg}) {
-        my $t = $a->{time} // croak "plot_topomap_panels: 'time' needed with 'avg'";
-        return (ref($a->{avg}) && eval { $a->{avg}->isa('PDL') })
-            ? $a->{avg}->slice(":,($t)")->flat
-            : pdl(map { $_->[$t] } @{ $a->{avg} });
+    elsif (defined $arg->{avg}) {
+        my $t = $arg->{time} // croak "plot_topomap_panels: 'time' needed with 'avg'";
+        return (ref($arg->{avg}) && eval { $arg->{avg}->isa('PDL') })
+            ? $arg->{avg}->slice(":,($t)")->flat
+            : pdl(map { $_->[$t] } @{ $arg->{avg} });
     }
     croak "plot_topomap_panels: supply 'values' or 'avg'+'time'";
 }

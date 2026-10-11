@@ -147,9 +147,9 @@ sub blink_evoked {
     my $sum = zeroes($nch, 2 * $half + 1);
     my $n   = 0;
     for my $p ($peaks->list) {
-        my $a = $p - $half; my $b = $p + $half;
-        next if $a < 0 || $b >= $nt;
-        my $ep = $X->slice(":,$a:$b")->sever;
+        my $i0 = $p - $half; my $i1 = $p + $half;
+        next if $i0 < 0 || $i1 >= $nt;
+        my $ep = $X->slice(":,$i0:$i1")->sever;
         if ($norm && defined $vi) {
             my $vpk = abs($ep->slice("($vi),"))->max;
             $ep /= ($vpk > 1e-6 ? $vpk : 1);

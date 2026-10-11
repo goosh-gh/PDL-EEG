@@ -459,14 +459,14 @@ sub read_nk {
         # Read every block, then concatenate with a short zero gap marker so
         # recording breaks stay visible without padding to real elapsed time.
         my @blk;
-        for my $b (0 .. $#wfm_addrs) {
-            my $next = ($b + 1 <= $#wfm_addrs) ? $wfm_addrs[$b+1] : $file_size;
-            my $r = _read_wfm_block($fh, $wfm_addrs[$b], $next, $fs_override);
+        for my $bi (0 .. $#wfm_addrs) {
+            my $next = ($bi + 1 <= $#wfm_addrs) ? $wfm_addrs[$bi+1] : $file_size;
+            my $r = _read_wfm_block($fh, $wfm_addrs[$bi], $next, $fs_override);
             $meta       //= $r->{meta};
             $n_ch       //= $r->{n_ch};
             $n_ch_valid //= $r->{n_ch_valid};
             $fs         //= $r->{fs};
-            croak "all_blocks: channel count differs at block $b ($r->{n_ch} vs $n_ch)"
+            croak "all_blocks: channel count differs at block $bi ($r->{n_ch} vs $n_ch)"
                 if $r->{n_ch} != $n_ch;
             push @blk, $r;
         }
@@ -474,14 +474,14 @@ sub read_nk {
         $total += $gap_samples * $#blk if @blk > 1;
         $data_uv = zeroes(float, $n_ch, $total);       # gap regions stay 0.0
         my $pos = 0;
-        for my $b (0 .. $#blk) {
-            my $ns = $blk[$b]{n_samp};
-            $data_uv->slice(",${pos}:${\($pos+$ns-1)}") .= $blk[$b]{data} if $ns > 0;
+        for my $bi (0 .. $#blk) {
+            my $ns = $blk[$bi]{n_samp};
+            $data_uv->slice(",${pos}:${\($pos+$ns-1)}") .= $blk[$bi]{data} if $ns > 0;
             push @t_block_starts, $pos;
             push @block_meta,
-                { start_samp => $pos, n_samp => $ns, t_start => $blk[$b]{meta}{t_start} };
+                { start_samp => $pos, n_samp => $ns, t_start => $blk[$bi]{meta}{t_start} };
             $pos += $ns;
-            if ($b < $#blk && $gap_samples > 0) {      # optional gap marker
+            if ($bi < $#blk && $gap_samples > 0) {      # optional gap marker
                 push @gap_bounds, [ $pos, $pos + $gap_samples - 1 ];
                 $pos += $gap_samples;
             }
@@ -838,18 +838,18 @@ sub _ext_segments {
     # candidate offsets: every "\x01TIME" in the data region
     my @cand;
     my $CHUNK = 1 << 22;
-    for (my $b = $rec; $b < $file_size; $b += $CHUNK - $hdr_len) {
+    for (my $base = $rec; $base < $file_size; $base += $CHUNK - $hdr_len) {
         my $len = $CHUNK;
-        $len = $file_size - $b if $b + $len > $file_size;
+        $len = $file_size - $base if $base + $len > $file_size;
         last if $len <= 0;
-        seek $fh, $b, 0;
+        seek $fh, $base, 0;
         my $buf;
         read($fh, $buf, $len) or last;
         my $p = -1;
         # CORE::index -- PDL::Slices exports an index() that shadows the builtin
         # ("Usage: PDL::index(a, ind)"). Same trap as t/09_i18n.t.
         while (($p = CORE::index($buf, "\x01TIME", $p + 1)) >= 0) {
-            my $off = $b + $p;
+            my $off = $base + $p;
             next if $off + $hdr_len > $file_size;
             push @cand, $off unless @cand && $cand[-1] == $off;
         }
@@ -876,12 +876,12 @@ sub _ext_segments {
 # 0x01, "TIME", version 0x02 0x02, and a channel count that agrees with eb3.
 sub _ext_is_hdr {
     my ($fh, $off, $n_ch) = @_;
-    my $b = _read_bytes($fh, $off, 0x46);
-    return 0 unless length($b) >= 0x46;
-    return 0 unless substr($b, 0, 5) eq "\x01TIME";
-    return 0 unless substr($b, 0x12, 2) eq "\x02\x02";
-    return 0 unless substr($b, 0x14, 14) =~ /^\d{14}$/;      # YYYYMMDDHHMMSS
-    return 0 unless unpack('v', substr($b, 0x44, 2)) == $n_ch - 1;
+    my $bytes = _read_bytes($fh, $off, 0x46);
+    return 0 unless length($bytes) >= 0x46;
+    return 0 unless substr($bytes, 0, 5) eq "\x01TIME";
+    return 0 unless substr($bytes, 0x12, 2) eq "\x02\x02";
+    return 0 unless substr($bytes, 0x14, 14) =~ /^\d{14}$/;      # YYYYMMDDHHMMSS
+    return 0 unless unpack('v', substr($bytes, 0x44, 2)) == $n_ch - 1;
     return 1;
 }
 
@@ -889,8 +889,8 @@ sub _ext_is_hdr {
 # +0x14 -- no BCD, no epoch guessing.
 sub _ext_hdr_time {
     my ($fh, $off) = @_;
-    my $b = _read_bytes($fh, $off + 0x14, 14);
-    return undef unless defined $b && $b =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
+    my $bytes = _read_bytes($fh, $off + 0x14, 14);
+    return undef unless defined $bytes && $bytes =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
     return "$1-$2-$3 $4:$5:$6";
 }
 
@@ -956,11 +956,11 @@ sub _attach_seg_samp {
             next unless defined $e->{t};
             $wall = $ep[0] + $e->{t};
         }
-        my $b = 0;
-        for my $i (0 .. $#ep) { $b = $i if $wall >= $ep[$i] }
-        my $s = $meta->[$b]{start_samp} + int(($wall - $ep[$b]) * $fs + 0.5);
-        $s = $meta->[$b]{start_samp} if $s < $meta->[$b]{start_samp};
-        my $end = $meta->[$b]{start_samp} + $meta->[$b]{n_samp} - 1;
+        my $bi = 0;
+        for my $i (0 .. $#ep) { $bi = $i if $wall >= $ep[$i] }
+        my $s = $meta->[$bi]{start_samp} + int(($wall - $ep[$bi]) * $fs + 0.5);
+        $s = $meta->[$bi]{start_samp} if $s < $meta->[$bi]{start_samp};
+        my $end = $meta->[$bi]{start_samp} + $meta->[$bi]{n_samp} - 1;
         $s = $end if $s > $end;
         $e->{samp}   = $s;
         $e->{t_data} = $s / $fs;
@@ -1381,16 +1381,16 @@ sub block_extents {
 
     my @out;
     my $pos = 0;
-    for my $b (0 .. $#wfm_addrs) {
-        my $waddr = $wfm_addrs[$b];
-        my $next  = ($b + 1 <= $#wfm_addrs) ? $wfm_addrs[$b + 1] : $file_size;
+    for my $bi (0 .. $#wfm_addrs) {
+        my $waddr = $wfm_addrs[$bi];
+        my $next  = ($bi + 1 <= $#wfm_addrs) ? $wfm_addrs[$bi + 1] : $file_size;
         my $h     = _read_wfm_header($fh, $waddr);            # header only
         my $data_bytes = ($next - $waddr) - ($h->{data_offset} - $waddr);
-        croak "block_extents: block $b data_bytes=$data_bytes not divisible by "
+        croak "block_extents: block $bi data_bytes=$data_bytes not divisible by "
             . "n_ch*2=" . ($h->{n_ch} * 2)
             if $data_bytes % ($h->{n_ch} * 2) != 0;
         my $n_samp = int($data_bytes / ($h->{n_ch} * 2));
-        push @out, { index      => $b,
+        push @out, { index      => $bi,
                      addr       => $waddr,
                      n_samp     => $n_samp,
                      start_samp => $pos,                       # all_blocks coords
@@ -1400,7 +1400,7 @@ sub block_extents {
                      n_ch       => $h->{n_ch},
                      n_ch_valid => $h->{n_ch_valid} };
         $pos += $n_samp;
-        $pos += $gap_samples if $b < $#wfm_addrs;              # matches read_nk
+        $pos += $gap_samples if $bi < $#wfm_addrs;              # matches read_nk
     }
     close $fh;
     return \@out;
@@ -1419,11 +1419,11 @@ sub block_ranges {
 
     my @out;
     if ($use_physical && @$meta) {
-        for my $b (0 .. $#$meta) {
-            my $lo = $meta->[$b]{start_samp};
-            my $ns = $meta->[$b]{n_samp};
-            push @out, { index => $b, start => $lo, end => $lo + $ns,
-                         t_start => $meta->[$b]{t_start} };
+        for my $bi (0 .. $#$meta) {
+            my $lo = $meta->[$bi]{start_samp};
+            my $ns = $meta->[$bi]{n_samp};
+            push @out, { index => $bi, start => $lo, end => $lo + $ns,
+                         t_start => $meta->[$bi]{t_start} };
         }
     } else {
         # Segment by .LOG "REC START" markers. Prefer the epoch-derived data
@@ -1568,7 +1568,7 @@ sub clock_to_samp {
     return int($wall_sec * $fs + 0.5) unless @anch;   # no anchors: assume 1:1
 
     my $best;
-    for my $a (@anch) { $best = $a if $a->{t} <= $wall_sec; }
+    for my $an (@anch) { $best = $an if $an->{t} <= $wall_sec; }
     $best ||= $anch[0];
 
     my $s   = $best->{samp} + int(($wall_sec - $best->{t}) * $fs + 0.5);

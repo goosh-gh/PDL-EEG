@@ -230,8 +230,8 @@ sub write_mul {
         my $need = length(sprintf("%.${dec}f", $mn < 0 ? $mn : -$mx));
         if ($need > $w) {
             my @wide = grep {
-                my ($a, $b) = $data->slice("($_),:")->minmax;
-                length(sprintf("%.${dec}f", $a < 0 ? $a : -$b)) > $w
+                my ($lo, $hi) = $data->slice("($_),:")->minmax;
+                length(sprintf("%.${dec}f", $lo < 0 ? $lo : -$hi)) > $w
             } 0 .. $nc - 1;
             carp sprintf(
                 "write_mul: %s need %d columns but fieldw=%d; the rows will not "

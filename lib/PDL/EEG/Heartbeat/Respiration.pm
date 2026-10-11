@@ -30,10 +30,10 @@ sub rr_series {
 }
 
 # ---------------------------------------------------------------------------
-# $a = r_amplitude($X, $r, $fs, %opt)
+# $amp = r_amplitude($X, $r, $fs, %opt)
 #
 #   $X : (nt) or (nlead, nt)
-#   $a : (nbeat) or (nlead, nbeat): the sample at each R index minus the mean
+#   $amp: (nbeat) or (nlead, nbeat): the sample at each R index minus the mean
 #        of the window `pre` before it
 #
 #   pre => [t0, t1]   window in seconds relative to R, default [-0.060, -0.041]
@@ -47,8 +47,8 @@ sub r_amplitude {
     croak "r_amplitude: pre must lie before R, t0 <= t1 < 0" unless $p0 <= $p1 && $p1 < 0;
     my $E   = beat_epochs($nd == 1 ? $X->dummy(0) : $X, $r, $p0, 1)->double;   # (nlead, -p0+1, nbeat)
     my $pre = $E->slice(":,0:" . ($p1 - $p0))->mv(1, 0)->average;             # (nlead, nbeat)
-    my $a   = ($E->slice(":,(-1)") - $pre)->sever;
-    return $nd == 1 ? $a->slice("(0)")->sever : $a;
+    my $amp = ($E->slice(":,(-1)") - $pre)->sever;
+    return $nd == 1 ? $amp->slice("(0)")->sever : $amp;
 }
 
 # ---------------------------------------------------------------------------
@@ -166,8 +166,8 @@ PDL::EEG::Heartbeat::Respiration - respiratory phase from beat-to-beat series of
     my ($t, $rr) = rr_series($r, $fs);                 # RR interval series
     my $ph_rr    = resp_phase($t, $rr);
 
-    my $a   = r_amplitude($X2, $r, $fs);               # (2, nbeat): two leads
-    my $mag = sqrt(($a ** 2)->sumover);                # (nbeat): size of the R vector
+    my $amp = r_amplitude($X2, $r, $fs);               # (2, nbeat): two leads
+    my $mag = sqrt(($amp ** 2)->sumover);              # (nbeat): size of the R vector
     my $ph_am = resp_phase($r->double / $fs, $mag);
 
     my $phi = phase_at($ph_rr, $r->double / $fs);      # phase at each R peak

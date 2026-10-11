@@ -504,9 +504,9 @@ sub write_edf {
             print {$fh} ${ $dig[$c]->slice("$lo:$hi")->short->sever->get_dataref };
         }
         if ($plus) {
-            my $a = $rec_tal[$r];
-            $a .= "\x00" x ($annot_spr * 2 - length $a);
-            print {$fh} $a;
+            my $tal = $rec_tal[$r];
+            $tal .= "\x00" x ($annot_spr * 2 - length $tal);
+            print {$fh} $tal;
         }
     }
     close $fh or croak "write_edf: close failed: $!";

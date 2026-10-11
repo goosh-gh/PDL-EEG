@@ -59,8 +59,8 @@ sub forward_project {
     my ($K, $j) = @_;
     my ($Ns,$Ne) = $K->dims;
     my $jj = $j->getndims < 2 ? $j->dummy(0) : $j->xchg(0,1); # (1|Nt, Ns)
-    my $b  = ($K x $jj);            # b = K j   ($K is (Ns,Ne) = math K)                    # (1|Nt, Ne)
-    return $b->getndims==2 && $b->dim(0)==1 ? $b->slice('(0),:')->sever : $b->xchg(0,1)->sever;
+    my $bv  = ($K x $jj);            # b = K j   ($K is (Ns,Ne) = math K)                    # (1|Nt, Ne)
+    return $bv->getndims==2 && $bv->dim(0)==1 ? $bv->slice('(0),:')->sever : $bv->xchg(0,1)->sever;
 }
 
 sub _gram {
@@ -137,9 +137,9 @@ sub inverse_operator {
 # Apply operator to scalp data b (Ne) or (Ne,Nt) -> source estimate (Ns) or (Ns,Nt).
 # For sloreta this returns the *standardized* amplitude jhat/sqrt(std).
 sub apply_inverse {
-    my ($op, $b) = @_;
+    my ($op, $bv) = @_;
     my $T = $op->{T};                        # (Ne,Ns)
-    my $bb = $b->getndims < 2 ? $b->dummy(0) : $b->xchg(0,1);  # (1|Nt, Ne)
+    my $bb = $bv->getndims < 2 ? $bv->dummy(0) : $bv->xchg(0,1);  # (1|Nt, Ne)
     my $j  = ($T x $bb);                      # (1|Nt, Ns)
     $j = $j->dim(0)==1 ? $j->slice('(0),:')->sever : $j->xchg(0,1)->sever;  # (Ns)|(Ns,Nt)
     if ($op->{method} eq 'sloreta') {
@@ -151,16 +151,16 @@ sub apply_inverse {
 
 # convenience: operator + data in one call
 sub source_estimate {
-    my ($K, $b, %o) = @_;
-    return apply_inverse( inverse_operator($K,%o), $b );
+    my ($K, $bv, %o) = @_;
+    return apply_inverse( inverse_operator($K,%o), $bv );
 }
 
 # quantity to colour the cortex with: power (>=0). For sloreta this is the
 # standardized statistic^2; for mne/eloreta the current-density power.
 sub source_power {
-    my ($op_or_K, $b, @rest) = @_;
-    my $j = ref($op_or_K) eq 'HASH' ? apply_inverse($op_or_K,$b)
-                                    : source_estimate($op_or_K,$b,@rest);
+    my ($op_or_K, $bv, @rest) = @_;
+    my $j = ref($op_or_K) eq 'HASH' ? apply_inverse($op_or_K,$bv)
+                                    : source_estimate($op_or_K,$bv,@rest);
     return $j*$j;
 }
 1;

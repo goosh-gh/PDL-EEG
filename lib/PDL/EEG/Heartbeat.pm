@@ -105,8 +105,8 @@ sub beat_average {
     $r = $r->where(($r + $n0 >= 0) & ($r + $n1 <= $nt));
     croak "beat_average: no beat fits in the record" if $r->isempty;
     my $E = beat_epochs($X, $r, $n0, $n1)->double;                 # (nch,nep,nb)
-    if (my $b = $o{baseline}) {
-        my ($i0, $i1) = (_rnd($b->[0] * $fs) - $n0, _rnd($b->[1] * $fs) - $n0 - 1);
+    if (my $bl = $o{baseline}) {
+        my ($i0, $i1) = (_rnd($bl->[0] * $fs) - $n0, _rnd($bl->[1] * $fs) - $n0 - 1);
         croak "beat_average: baseline window outside the epoch"
             if $i0 < 0 || $i1 >= $n1 - $n0 || $i1 < $i0;
         $E -= $E->slice(":,$i0:$i1")->mv(1, 0)->average->dummy(1);
@@ -167,15 +167,15 @@ sub surrogate_r {
 # $bn1, $bn2: same shape; all elements are used.
 # ---------------------------------------------------------------------------
 sub bn_balance {
-    my ($a, $b) = map { $_->flat->double } @_;
-    croak "bn_balance: shapes differ" unless $a->nelem == $b->nelem;
-    my $d   = $a - $b;
+    my ($bn1, $bn2) = map { $_->flat->double } @_;
+    croak "bn_balance: shapes differ" unless $bn1->nelem == $bn2->nelem;
+    my $d   = $bn1 - $bn2;
     my $den = sum($d * $d);
     croak "bn_balance: the two inputs are identical" if $den <= 0;
-    my $w   = -sum($b * $d) / $den;
-    my $mix = $w * $a + (1 - $w) * $b;
+    my $w   = -sum($bn2 * $d) / $den;
+    my $mix = $w * $bn1 + (1 - $w) * $bn2;
     my $rms = sub { sqrt(sum($_[0] * $_[0]) / $_[0]->nelem) };
-    return ($w, $rms->($mix), $rms->($a), $rms->($b));
+    return ($w, $rms->($mix), $rms->($bn1), $rms->($bn2));
 }
 
 1;

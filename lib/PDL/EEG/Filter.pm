@@ -188,10 +188,10 @@ PDL::EEG::Filter - temporal filters for multichannel EEG: zero-phase Butterworth
     use PDL::EEG::Filter qw(zp_butter analytic_signal envelope inst_phase);
 
     my $y   = zp_butter($X, fs => 1000, low => 0.5, high => 45, order => 4);   # (nch, nt)
-    my $a   = zp_butter($X, fs => 1000, low => 8, high => 13, order => 3);
-    my $env = envelope($a);                    # (nch, nt)
-    my $ph  = inst_phase($a);                  # radians, -pi..pi
-    my ($re, $im) = analytic_signal($a);
+    my $alpha = zp_butter($X, fs => 1000, low => 8, high => 13, order => 3);
+    my $env = envelope($alpha);                # (nch, nt)
+    my $ph  = inst_phase($alpha);              # radians, -pi..pi
+    my ($re, $im) = analytic_signal($alpha);
 
 =head1 DESCRIPTION
 
