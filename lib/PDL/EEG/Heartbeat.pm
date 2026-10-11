@@ -4,102 +4,13 @@ use strict;
 use warnings;
 use Carp qw(croak);
 use PDL;
-use PDL::FFT;
+use PDL::EEG::Filter qw(zp_butter);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(
-    zp_butter detect_r beat_epochs beat_average surrogate_r bn_balance
+    detect_r beat_epochs beat_average surrogate_r bn_balance
 );
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
-
-# ---------------------------------------------------------------------------
-# zp_butter($x, fs => $hz, low => $f1, high => $f2, order => $n [, pad => $sec])
-#
-# Zero-phase Butterworth filter, applied in the frequency domain.
-#
-#   $x : (nt) or (nch, nt)
-#   low only          -> high-pass at `low`
-#   high only         -> low-pass  at `high`
-#   low and high      -> band-pass  low..high
-#
-# The gain applied to each FFT bin is the squared magnitude of the digital
-# (bilinear-transform) Butterworth filter of the given order,
-#
-#     G(f) = 1 / (1 + q(f)^(2*order)),   W = tan(pi f / fs)
-#     q = Wc/W (high-pass),  W/Wc (low-pass),  (W^2 - W1 W2)/((W2 - W1) W) (band-pass)
-#
-# which is what a forward-backward pass (scipy.signal.filtfilt of
-# scipy.signal.butter(order, ...)) has in steady state. The record is extended
-# at both ends by odd reflection (`pad` seconds, default 3/low or 3/high,
-# at most nt-1 samples) and the two extension ends are joined by a straight line
-# up to an FFT-friendly length, so the circular FFT sees no step.
-# ---------------------------------------------------------------------------
-sub zp_butter {
-    my ($x, %o) = @_;
-    my $fs = $o{fs} or croak "zp_butter: fs required";
-    my ($lo, $hi) = @o{qw(low high)};
-    croak "zp_butter: give low and/or high" unless defined $lo || defined $hi;
-    my $N  = $o{order} // 2;
-    my $nd = $x->ndims;
-    croak "zp_butter: x must be (nt) or (nch,nt)" unless $nd == 1 || $nd == 2;
-
-    my $X  = ($nd == 1 ? $x->dummy(0) : $x)->mv(1, 0)->double;   # (nt, nch)
-    my $nt = $X->dim(0);
-    my $fc = defined $lo ? $lo : $hi;
-    my $pad = int((defined $o{pad} ? $o{pad} : 3 / $fc) * $fs);
-    $pad = $nt - 1 if $pad > $nt - 1;
-    my $L  = _fast_len($nt + 2 * $pad + 16);
-    my $ng = $L - $nt - 2 * $pad;                                # join length
-
-    my $re = zeroes(double, $L, $X->dim(1));
-    $re->slice("$pad:" . ($pad + $nt - 1)) .= $X;
-    if ($pad > 0) {
-        my $x0 = $X->slice("0:0");
-        my $xn = $X->slice("-1:-1");
-        $re->slice("0:" . ($pad - 1)) .= 2 * $x0 - $X->slice("$pad:1");
-        $re->slice(($pad + $nt) . ":" . (2 * $pad + $nt - 1))
-            .= 2 * $xn - $X->slice("-2:" . ($nt - 1 - $pad));
-    }
-    {   # straight line from the last extended sample back to the first
-        my $a = $re->slice("(" . (2 * $pad + $nt - 1) . ")");    # (nch)
-        my $b = $re->slice("(0)");
-        my $w = (sequence($ng) + 1) / ($ng + 1);                 # (ng)
-        $re->slice((2 * $pad + $nt) . ":-1")
-            .= $a->dummy(0) + ($b - $a)->dummy(0) * $w->dummy(1);
-    }
-    my $im = zeroes(double, $re->dims);
-    fft($re, $im);
-
-    my $k = sequence($L);
-    my $f = $k * ($fs / $L);
-    $f = $f->where($k <= $L / 2)->append(($fs - $f)->where($k > $L / 2));
-    my $W = tan(3.14159265358979323846 * $f / $fs);
-    $W = $W->clip(1e-300, 1e300);
-    my $q;
-    if (defined $lo && defined $hi) {
-        my ($W1, $W2) = map { tan(3.14159265358979323846 * $_ / $fs) } $lo, $hi;
-        $q = ($W * $W - $W1 * $W2) / (($W2 - $W1) * $W);
-    } elsif (defined $lo) {
-        $q = tan(3.14159265358979323846 * $lo / $fs) / $W;
-    } else {
-        $q = $W / tan(3.14159265358979323846 * $hi / $fs);
-    }
-    my $g = 1 / (1 + ($q * $q) ** $N);                            # (L)
-    $re *= $g; $im *= $g;
-    ifft($re, $im);
-
-    my $y = $re->slice("$pad:" . ($pad + $nt - 1))->mv(0, 1)->sever;   # (nch, nt)
-    return $nd == 1 ? $y->slice("(0)")->sever : $y;
-}
-
-sub _fast_len {                       # smallest 2^a 3^b 5^c >= n
-    my $n = shift;
-    for (my $m = $n; ; $m++) {
-        my $r = $m;
-        for my $p (2, 3, 5) { $r /= $p while $r % $p == 0 }
-        return $m if $r == 1;
-    }
-}
 
 # ---------------------------------------------------------------------------
 # ($r, $sign) = detect_r($ecg, $fs, %opt)
@@ -296,15 +207,10 @@ L<PDL::EEG::Regress>.
 
 =over 4
 
-=item zp_butter($x, fs=>, low=>, high=>, order=>)
-
-Zero-phase Butterworth high-, low- or band-pass, applied in the frequency
-domain with the squared-magnitude response of the digital Butterworth filter
-(the steady-state response of a forward-backward pass).
-
 =item detect_r($ecg, $fs, %opt)
 
-R-peak sample indices and R polarity from one cardiac channel.
+R-peak sample indices and R polarity from one cardiac channel. The channel is
+band-passed with C<zp_butter> of L<PDL::EEG::Filter>.
 
 =item beat_epochs($X, $r, $n0, $n1)
 

@@ -8,8 +8,16 @@ Revision history for PDL-EEG
       and a vEOG-guided blink workflow (detect_blinks / blink_free /
       blink_evoked / fit_blink / remove_blinks). Single blink component only.
     - PDL::EEG::Regress: regress_out() -- temporal nuisance / EOG regression.
-    - PDL::EEG::Heartbeat: zp_butter (zero-phase Butterworth in the frequency
-      domain), detect_r, beat_epochs, beat_average, surrogate_r, bn_balance.
+    - PDL::EEG::Heartbeat: detect_r, beat_epochs, beat_average, surrogate_r,
+      bn_balance.
+    - PDL::EEG::Heartbeat::Respiration: respiratory phase from beat-to-beat
+      series of the heartbeat (rr_series, r_amplitude, resp_phase, phase_at,
+      phase_locking). t/25_respiration.t (synthetic recording with a known
+      breathing phase).
+    - PDL::EEG::Filter: filters along the time axis. zp_butter (zero-phase
+      Butterworth in the frequency domain; it was in PDL::EEG::Heartbeat, which
+      no longer exports it), analytic_signal, envelope, inst_phase.
+      t/24_filter.t (reference values from scipy filtfilt and hilbert).
     - PDL::EEG::MAP2D: plot_joint (all channels coloured by electrode position,
       scalp maps at chosen latencies tied to the waveforms); examples/
       heartbeat_joint.pl; t/23_joint.t.
@@ -25,7 +33,8 @@ Revision history for PDL-EEG
     - examples/heartbeat_hep_scalp.pl: R-locked scalp maps in the recorded
       reference against non-heartbeat time points, BN1/BN2 two-lead fits.
     - examples/heartbeat_bne_survey.pl, t/22_heartbeat.t (deterministic
-      synthetic ECG; filter and R-peak reference values from scipy).
+      synthetic ECG; R-peak reference values from an independent
+      implementation).
     - PDL::EEG::Spans: time-interval span annotations, .spans.tsv sidecar,
       spans_to_mask / kinds_present.
     - PDL::EEG::ICA: pure-PDL symmetric FastICA (whiten / fastica /

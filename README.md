@@ -32,7 +32,9 @@ eye-blink artifacts (GED), and export to EDF/EDF+ or BESA ASCII multiplexed
 | `PDL::EEG::ICA` | Symmetric FastICA in pure PDL (no LAPACK: whitening and the symmetric orthogonalization use `PDL::MatrixOps` `eigens_sym`). `ica_decompose` returns unmixing/mixing matrices and component activations; `identify_by_reference` scores each component against a reference channel (e.g. vEOG); `apply_ica` reconstructs with a chosen component subset removed. Data layout `(nt, nch)`. Built to compare ICA-based ocular cleaning against `PDL::EEG::GED`. |
 | `PDL::EEG::Spans` | Time-interval annotations shared between the viewer and the artifact remover. A span is `{kind,t0,t1}` in seconds; `read_spans`/`write_spans` persist them to a `<file>.spans.tsv` sidecar; `spans_to_mask` rasterises one `kind` to a per-sample byte mask; `kinds_present` lists the kinds present. `kind` is free-form (`blink`, `hsaccade`, `bad`, or any GED class name). |
 | `PDL::EEG::Regress` | Temporal nuisance / EOG regression. `regress_out($X, @sources)` removes, from every channel of `$X` (nch,nt), the least-squares fit on a set of source time courses (GED or ICA component activations, or raw EOG channels — with EOG channels it is classic Gratton–Coles regression). Sources are orthonormalised first, so correlated sources are partialled out jointly and the removal depends only on the span of the sources, not on labelling any one vertical/horizontal. Channel DC is preserved. Pure PDL. |
-| `PDL::EEG::Heartbeat` | R-peak detection and R-locked averaging. `zp_butter` is a zero-phase Butterworth high-/low-/band-pass applied in the frequency domain (squared-magnitude response of the digital Butterworth filter, odd-reflection padding); `detect_r($ecg,$fs)` returns R-peak sample indices and R polarity (5–20 Hz band, percentile threshold, 0.30 s minimum distance, ±40 ms refinement on the 0.5 Hz high-passed signal); `beat_epochs` cuts `(nch,nep,nbeat)`; `beat_average` gives the R-locked mean or median, across-beat SD and per-channel beat count, with optional per-beat baseline and per-channel peak-to-peak rejection; `surrogate_r` displaces every R index by a seeded random offset (non-heartbeat time points); `bn_balance($bn1,$bn2)` returns the weight `w` minimising the energy of `w*bn1 + (1-w)*bn2`. Layout `(nch, nt)`. Pure PDL (`PDL::FFT`). |
+| `PDL::EEG::Heartbeat` | R-peak detection and R-locked averaging. `detect_r($ecg,$fs)` returns R-peak sample indices and R polarity (5–20 Hz band, percentile threshold, 0.30 s minimum distance, ±40 ms refinement on the 0.5 Hz high-passed signal); `beat_epochs` cuts `(nch,nep,nbeat)`; `beat_average` gives the R-locked mean or median, across-beat SD and per-channel beat count, with optional per-beat baseline and per-channel peak-to-peak rejection; `surrogate_r` displaces every R index by a seeded random offset (non-heartbeat time points); `bn_balance($bn1,$bn2)` returns the weight `w` minimising the energy of `w*bn1 + (1-w)*bn2`. Layout `(nch, nt)`. Filtering by `PDL::EEG::Filter`. |
+| `PDL::EEG::Heartbeat::Respiration` | Respiratory phase from beat-to-beat series of the heartbeat (ECG-derived respiration). `rr_series($r,$fs)` gives the RR-interval series; `r_amplitude($X,$r,$fs)` the R amplitude of one or several leads at every beat, relative to a window before R; `resp_phase($t,$y)` resamples such a series to 4 Hz, band-passes it (0.20–0.45 Hz by default) and takes its analytic signal, returning also the spectral peak inside the band and the share of power in the band; `phase_at` gives the phase at any time (0 at a maximum of the band-passed series, ±π at a minimum; which of them is inspiration is not determined); `phase_locking($p,$q)` gives the phase-locking value and mean difference of two phase series. One value per heartbeat goes in, so a breathing rate above half the heart rate is not represented. |
+| `PDL::EEG::Filter` | Filters along the time axis, for `(nt)` or `(nch, nt)`. `zp_butter` is a zero-phase Butterworth high-/low-/band-pass applied in the frequency domain (squared-magnitude response of the digital Butterworth filter, odd-reflection padding). `analytic_signal` returns the signal and its Hilbert transform (channel mean removed, zeros added up to a length with prime factors 2, 3, 5; `exact => 1` transforms at the record's own length, which is `scipy.signal.hilbert`); `envelope` and `inst_phase` are its magnitude and angle. Pure PDL (`PDL::FFT`). |
 ## Command-line tools
 
 | Tool | Role |
@@ -629,14 +631,25 @@ cleaned + removed reconstructs the input; render-free, needs only PDL).
 offset/clip edge cases; needs only PDL).
 `t/20_ica` (ICA: whitening, symmetric FastICA source recovery, remove-none
 identity, mixing reconstruction; render-free, needs only PDL).
-`t/22_heartbeat` (Heartbeat: `zp_butter` against scipy `filtfilt` values and the
-analytic gain, `detect_r` against the reference R samples in both polarities,
+`t/22_heartbeat` (Heartbeat: `detect_r` against the reference R samples in both polarities,
 `beat_epochs`/`beat_average` against explicit sums incl. baseline, rejection and
 median, `surrogate_r` seeding and bounds, `bn_balance` closed form; deterministic,
 needs only PDL).
 `t/23_joint` (MAP2D `plot_joint`: renders with and without `outfile`, one
 connection per latency, panel count, argument checks; skipped without
 `PDL::Graphics::Cairo` providing `Figure::add_connection` and `add_text`).
+`t/24_filter` (Filter: `zp_butter` against scipy `filtfilt` values and the
+analytic gain; `analytic_signal` with `exact` against scipy `hilbert` values for
+an even and an odd length, edges included; `envelope` and `inst_phase` against
+the amplitude and phase of a synthetic modulated carrier, with an unmodulated
+carrier as control; `(nch,nt)` input, a prime length, a channel offset;
+deterministic, needs only PDL).
+`t/25_respiration` (Heartbeat::Respiration: a synthetic recording with a known
+breathing phase drifting from 0.27 to 0.35 Hz that modulates the RR interval and
+the R amplitude of two leads; `rr_series` and `r_amplitude` against the values
+built in, the phase from each series against the true phase, the lag built in
+between the two, an RR series without breathing as control, `phase_locking`
+closed forms, argument checks; deterministic, needs only PDL).
 
 `xt/70_real_data.t` is a real-data regression (not part of `make test`; needs
 private recordings). Pass `.EEG` paths and it checks event placement on real

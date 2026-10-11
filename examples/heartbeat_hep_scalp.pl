@@ -46,6 +46,7 @@ use FindBin;
 use lib "$FindBin::Bin/../lib";
 use Getopt::Long;
 use PDL::EEG::IO::EDF   qw(read_edf);
+use PDL::EEG::Filter    qw(zp_butter);
 use PDL::EEG::Heartbeat qw(:all);
 
 my ($bn1, $bn2, $skip, $band, $reject, $nsurr, $seed) = ('BN1', 'BN2', 10, '0.5,45', 150, 200, 1);

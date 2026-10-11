@@ -20,48 +20,13 @@ for my $k (0 .. 63) {
     push @true, int($c * $fs + 0.5);
 }
 
-# Reference values for this signal from an independent implementation:
-# scipy.signal.butter + filtfilt, and detect_r() of hrp_first100.py (scipy 1.18.1).
-my @IDX = (5000, 9999, 15000, 20001, 25000);
-my %REF = (
-    bp => [-0.241612764, -0.176433326, -0.024888856,  0.004606886, -0.012554735],
-    hp => [-0.050495358, -0.112319427,  0.025290246,  0.132529752, -0.004125916],
-    lp => [ 0.022371938, -0.006903421,  0.102499107,  0.182370058,  0.071445484],
-);
+# R samples for this signal from an independent implementation:
+# detect_r() of hrp_first100.py (scipy 1.18.1).
 my @R_REF = qw(501 965 1424 1872 2310 2742 3179 3624 4083 4551 5015 5474 5922 6359
     6792 7229 7675 8134 8602 9066 9524 9972 10408 10841 11278 11725 12184 12652 13116
     13574 14022 14457 14891 15328 15775 16234 16702 17167 17624 18071 18506 18941
     19377 19825 20285 20752 21218 21674 22121 22555 22990 23427 23875 24335 24803
     25269 25724 26171 26605 27040 27476 27925 28385 28853);
-
-# ---- zp_butter -------------------------------------------------------------
-my %F = (bp => [low => 5, high => 20, order => 3],
-         hp => [low => 0.5, order => 2],
-         lp => [high => 40, order => 4]);
-for my $k (sort keys %F) {
-    my $y = zp_butter($x, fs => $fs, @{ $F{$k} });
-    is($y->nelem, $nt, "zp_butter $k: length kept");
-    my $d = ($y->index(pdl(long, \@IDX)) - pdl($REF{$k}))->abs->max;
-    cmp_ok($d, '<', 1e-6, "zp_butter $k: interior samples match filtfilt (max diff $d)");
-}
-{
-    my $X2 = cat($x, -2 * $x)->xchg(0, 1);                    # (2, nt)
-    my $y2 = zp_butter($X2, fs => $fs, low => 5, high => 20, order => 3);
-    is_deeply([$y2->dims], [2, $nt], 'zp_butter: (nch,nt) in, (nch,nt) out');
-    my $y1 = zp_butter($x, fs => $fs, low => 5, high => 20, order => 3);
-    cmp_ok(($y2->slice("(0)") - $y1)->abs->max, '<', 1e-12, 'zp_butter: row 0 = 1-D result');
-    cmp_ok(($y2->slice("(1)") + 2 * $y1)->abs->max, '<', 1e-12, 'zp_butter: linear in the input');
-    # a pure 10 Hz sine keeps the analytic Butterworth gain, a 1 Hz sine is removed
-    my $g = sub {
-        my $f = shift;
-        my $y = zp_butter(sin(2 * $PI * $f * $t), fs => $fs, low => 5, high => 20, order => 3);
-        sqrt(2 * ($y->slice("5000:24999") ** 2)->avg);
-    };
-    my ($w, $w1, $w2) = map { sin($PI * $_ / $fs) / cos($PI * $_ / $fs) } 10, 5, 20;
-    my $q = ($w * $w - $w1 * $w2) / (($w2 - $w1) * $w);
-    cmp_ok(abs($g->(10) - 1 / (1 + $q ** 6)), '<', 1e-6, 'zp_butter: 10 Hz gain = 1/(1+q^6)');
-    cmp_ok($g->(1), '<', 1e-3, 'zp_butter: 1 Hz removed by the 5-20 Hz band');
-}
 
 # ---- detect_r --------------------------------------------------------------
 {
