@@ -13,6 +13,15 @@ Revision history for PDL-EEG
     - PDL::EEG::MAP2D: plot_joint (all channels coloured by electrode position,
       scalp maps at chosen latencies tied to the waveforms); examples/
       heartbeat_joint.pl; t/23_joint.t.
+    - PDL::EEG::MAP2D plot_topomap: when drawn into the caller's axes
+      (_ax / _fig), colorbar => { ... } attaches a colour bar of
+      PDL::Graphics::Cairo to that axes (t/15).
+    - PDL::EEG::MAP2D: grid_layout_1020 -- the 19 electrodes of the 10-20
+      system as a 5x5 grid of panels (row and column per channel name, old and
+      new names, and the free cell for a scalp map). (t/15)
+    - examples/avg_grid_scrub.pl: a tab-separated average as a 5x5 grid of
+      panels laid out like the 10-20 system, with a scalp map that follows the
+      latency chosen by click or drag (show_grid_scrub of PDL::Graphics::Cairo).
     - examples/heartbeat_hep_scalp.pl: R-locked scalp maps in the recorded
       reference against non-heartbeat time points, BN1/BN2 two-lead fits.
     - examples/heartbeat_bne_survey.pl, t/22_heartbeat.t (deterministic

@@ -16,6 +16,7 @@ our @EXPORT_OK = qw(
     plot_joint
     project_positions
     interpolate_topo
+    grid_layout_1020
 );
 
 # ---------------------------------------------------------------------------
@@ -223,6 +224,52 @@ sub _colorize {
 }
 
 # ---------------------------------------------------------------------------
+# grid_layout_1020 - the 19 electrodes of the 10-20 system as a 5 x 5 grid of
+# panels, for figures with one panel per channel
+#
+#          Fp1 [map] Fp2
+#     F7   F3   Fz  F4   F8
+#     T3   C3   Cz  C4   T4
+#     T5   P3   Pz  P4   T6
+#          O1       O2
+# ---------------------------------------------------------------------------
+my @GRID_1020 = (
+    [ undef, 'Fp1', undef, 'Fp2', undef ],
+    [ 'F7',  'F3',  'Fz',  'F4',  'F8'  ],
+    [ 'T3',  'C3',  'Cz',  'C4',  'T4'  ],
+    [ 'T5',  'P3',  'Pz',  'P4',  'T6'  ],
+    [ undef, 'O1',  undef, 'O2',  undef ],
+);
+
+sub grid_layout_1020 {
+    my %cell;
+    for my $r (0 .. $#GRID_1020) {
+        for my $c (0 .. $#{ $GRID_1020[$r] }) {
+            my $n = $GRID_1020[$r][$c] // next;
+            $cell{$n} = [$r, $c];
+            $cell{ $ALIAS{$n} } = [$r, $c] if $ALIAS{$n};      # T7/T8/P7/P8
+        }
+    }
+    return { nrows => scalar @GRID_1020, ncols => scalar @{ $GRID_1020[0] },
+             cell => \%cell, map => [0, 2] };
+}
+
+# The same colour scale as an object for PDL::Graphics::Cairo's colorbar:
+# rgb_at($v), $v in [0,1], returns (r, g, b) in [0,1].
+{
+    package PDL::EEG::MAP2D::_Cmap;
+    sub new { bless {}, shift }
+    sub rgb_at {
+        my ($self, $v) = @_;
+        $v = 0 if $v < 0; $v = 1 if $v > 1;
+        my $x = $v * $#RDBU_R;
+        my $i = int($x); $i = $#RDBU_R - 1 if $i >= $#RDBU_R;
+        my $f = $x - $i;
+        return map { $RDBU_R[$i][$_] + $f * ($RDBU_R[$i + 1][$_] - $RDBU_R[$i][$_]) } 0 .. 2;
+    }
+}
+
+# ---------------------------------------------------------------------------
 # plot_topomap - the public entry point
 # ---------------------------------------------------------------------------
 sub plot_topomap {
@@ -332,7 +379,14 @@ sub plot_topomap {
     # ---- colour limits (from scalp reference, so EOG can't blow the scale) --
     my ($lo, $hi);
     if (defined $a{clim}) {
-        ($lo, $hi) = ref($a{clim}) ? @{ $a{clim} } : (-$a{clim}, $a{clim});
+        # a number, a one-element piddle, or [lo, hi]
+        my $c = $a{clim};
+        if (ref $c eq 'ARRAY') { ($lo, $hi) = @$c }
+        else {
+            $c = $c->sclr if ref $c && eval { $c->isa('PDL') };
+            croak "plot_topomap: 'clim' must be a number or [lo, hi]" if ref $c;
+            ($lo, $hi) = (-abs($c), abs($c));
+        }
     }
     else {
         my $ri  = which($fref);
@@ -373,6 +427,16 @@ sub plot_topomap {
     $ax->imshow($hwc, origin => 'lower');
     $ax->set_aspect('equal');
     $ax->axis('off');
+    # embedded, colorbar => { ... }: a colour bar attached to the caller's axes,
+    # drawn by PDL::Graphics::Cairo (the hash is passed to $ax->colorbar)
+    if ($a{_ax} && ref $a{colorbar} eq 'HASH') {
+        if ($ax->can('colorbar_reserve')) {
+            $ax->colorbar(cmap => PDL::EEG::MAP2D::_Cmap->new, vmin => $lo, vmax => $hi,
+                          %{ $a{colorbar} });
+        } else {
+            carp "plot_topomap: colour bar skipped (this PDL::Graphics::Cairo has no colorbar(cmap => ...))";
+        }
+    }
 
     # contour on a NaN-masked copy so lines stop at the head rim
     my $ncont = $a{contours} // 6;
@@ -1126,6 +1190,12 @@ Colour-bar unit label (default C<uV>).
 
 Draw the colour bar (default 1).
 
+When the map is drawn into the caller's axes (C<_ax>, C<_fig>) no colour bar is
+drawn, unless C<colorbar> is a hash reference: the hash is passed to that axes'
+C<colorbar> method of PDL::Graphics::Cairo together with the colour scale and
+its limits, e.g. C<< colorbar => { location => 'right', width => 7, reserve => 0 } >>.
+This needs a PDL::Graphics::Cairo whose C<colorbar> accepts C<cmap>.
+
 =item C<cbar_label_x> => number
 
 Horizontal position of the three colour-bar numbers (default 3.4, in
@@ -1155,6 +1225,27 @@ C<recenter>, C<periph_deg>.
 Scattered sensor values to a dense grid via thin-plate spline; returns
 C<($field, $inside, $extent, $clip_radius)>.  Options: C<res>, C<clip>,
 C<extent>, C<anchors>.
+
+=item grid_layout_1020()
+
+    my $g = grid_layout_1020();
+    my ($row, $col) = @{ $g->{cell}{Cz} };       # (2, 2)
+
+The 19 electrodes of the 10-20 system as a grid of panels, for figures with one
+panel per channel:
+
+         Fp1 [map] Fp2
+    F7   F3   Fz  F4   F8
+    T3   C3   Cz  C4   T4
+    T5   P3   Pz  P4   T6
+         O1       O2
+
+Returns a hash reference: C<nrows> and C<ncols> (5 and 5); C<cell>, a hash from
+channel name to C<[row, column]> (0-based, row 0 at the top) that has both the
+old and the new names (T3/T7, T4/T8, T5/P7, T6/P8); and C<map>, the free cell
+at the top centre, C<[0, 2]>, where a scalp map fits. The names are those
+spelled above; the lookup is by exact name. A new hash is built on every call,
+so the caller may add or change entries.
 
 =back
 

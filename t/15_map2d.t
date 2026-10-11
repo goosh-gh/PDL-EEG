@@ -48,4 +48,49 @@ ok($field->isfinite->all, 'field is finite everywhere');
 ok($inside->sum > 0 && $inside->sum < $field->nelem, 'in-disc mask is a subset');
 ok($rclip > 0.5, 'clip radius extends past the head circle');
 
+# ---- grid_layout_1020 -----------------------------------------------------------
+{
+    my $g = PDL::EEG::MAP2D::grid_layout_1020();
+    is_deeply([ @$g{qw(nrows ncols)} ], [5, 5], 'grid_layout_1020: 5 x 5');
+    my %seen; $seen{ join ',', @{ $g->{cell}{$_} } }++ for @chan;
+    is(scalar keys %seen, 19, 'grid_layout_1020: the 19 channels have 19 different cells');
+    is_deeply($g->{cell}{Cz},  [2, 2], 'Cz in the centre');
+    is_deeply($g->{cell}{Fp1}, [0, 1], 'Fp1 top, left of the middle');
+    is_deeply($g->{cell}{O2},  [4, 3], 'O2 bottom, right of the middle');
+    is_deeply([ map { $g->{cell}{$_} } qw(T7 T8 P7 P8) ], [ map { $g->{cell}{$_} } qw(T3 T4 T5 T6) ],
+              'new names share the cells of the old ones');
+    ok(!$seen{ join ',', @{ $g->{map} } }, 'the map cell is not used by a channel');
+    $g->{cell}{Cz} = [9, 9];
+    is_deeply(PDL::EEG::MAP2D::grid_layout_1020()->{cell}{Cz}, [2, 2], 'each call returns a fresh table');
+}
+
+# ---- embedded map with a colour bar of PDL::Graphics::Cairo ---------------------
+SKIP: {
+    eval { require PDL::Graphics::Cairo; require PDL::Graphics::Cairo::Axes; 1 }
+        or skip 'PDL::Graphics::Cairo not installed', 7;
+    PDL::Graphics::Cairo::Axes->can('colorbar_reserve')
+        or skip 'this PDL::Graphics::Cairo has no colorbar(cmap => ...)', 7;
+
+    my $cm = PDL::EEG::MAP2D::_Cmap->new;
+    my @lo = $cm->rgb_at(0); my @mid = $cm->rgb_at(0.5); my @hi = $cm->rgb_at(1);
+    ok($lo[2] > $lo[0] && $hi[0] > $hi[2], 'colour scale object: blue at the low end, red at the high end');
+    ok((grep { $_ > 0.9 } @mid) == 3, 'colour scale object: near white in the middle');
+
+    my $fig = PDL::Graphics::Cairo::figure(width => 400, height => 300);
+    my $gs  = $fig->add_gridspec(1, 1, cell_margins => 0);
+    my $ax  = $fig->add_subplot($gs->at(0, 0));
+    my @r = PDL::EEG::MAP2D::plot_topomap(values => $v, labels => \@keep, montage => $mon, clim => 3,
+        contours => 0, res => 40, _ax => $ax, _fig => $fig, colorbar => { width => 7, reserve => 0 });
+    is_deeply(\@r, [-3, 3], 'embedded plot_topomap returns the colour limits');
+    is_deeply([ @{ $ax->_colorbar }{qw(vmin vmax)} ], [-3, 3], 'colorbar => { ... }: bar attached with the map limits');
+    @r = eval { PDL::EEG::MAP2D::plot_topomap(values => $v, labels => \@keep, montage => $mon, clim => pdl(2.5)->max,
+        contours => 0, res => 40, _ax => $fig->add_subplot($gs->at(0, 0)), _fig => $fig) };
+    is_deeply(\@r, [-2.5, 2.5], "clim may be a one-element piddle ($@)");
+    eval { PDL::EEG::MAP2D::plot_topomap(values => $v, labels => \@keep, montage => $mon, clim => {}, res => 40,
+        _ax => $ax, _fig => $fig) };
+    like($@, qr/'clim' must be/, 'other references as clim are refused');
+    my $bytes = eval { $fig->to_png };
+    ok(!$@ && length($bytes) > 0, "embedded map with colour bar renders ($@)");
+}
+
 done_testing;
