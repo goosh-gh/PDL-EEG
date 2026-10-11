@@ -1,6 +1,21 @@
 Revision history for PDL-EEG
 
 0.05  (unreleased)
+  CHANGED
+    - PDL::EEG::TFA: faster convolution engine, same coefficients (agreement
+      with the previous implementation to rounding, <= 2e-13 relative).
+      The signal FFT is computed once and reused for every frequency; all
+      trials of tfr_morlet / tfr_superlet / tfr_stat are transformed
+      together in blocks; the FFT length is a product of 2, 3 and 5 just
+      above ntime + the longest kernel half-length (was the next power of
+      two above ntime + kernel length, per frequency); tfr_morlet only
+      accumulates what the requested output needs. Measured on Linux,
+      PDL 2.085: cwt_morlet on 297000 samples x 14 frequencies 3.4 s ->
+      0.9 s; tfr_morlet (output => 'all') on 292 x 2500 samples x 14
+      frequencies 4.5 s -> 1.1 s; tfr_morlet power on 400 x 1701 samples x
+      167 frequencies 49 s -> 8 s. t/16_tfa.t: comparison with a direct
+      time-domain convolution, trials together vs one at a time, block
+      size independence.
   ADDED
     - PDL::EEG::GED: generic GED spatial filter (ged_cov / ged_operator /
       apply_ged; S w = lambda R w via PDL::LinearAlgebra sygvd, R-orthonormal

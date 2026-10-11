@@ -141,4 +141,85 @@ my $PI = 4 * atan2(1, 1);
     ok($diff < 1e-9, 'total power = evoked + induced');
 }
 
+# ---- engine: agrees with a direct time-domain convolution -----------------
+# Independent reference: 'same'-mode linear convolution with zero-padded
+# edges, summed tap by tap.  Covers a kernel longer than the signal and a
+# kernel much shorter than it (one FFT length serves every frequency).
+sub _direct_cwt {
+    my ($x, $sfreq, $f, $nc) = @_;
+    my ($wr, $wi) = morlet_wavelet($f, $sfreq, n_cycles => $nc);
+    my $nw = $wr->nelem; my $half = ($nw - 1) / 2; my $nt = $x->nelem;
+    my $pad = zeroes(double, $nt + 2 * $half);
+    $pad->slice("$half:" . ($half + $nt - 1)) .= $x;
+    my $cr = zeroes(double, $nt); my $ci = zeroes(double, $nt);
+    for my $j (0 .. $nw - 1) {                    # c[n] = sum_j x[n + half - j] w[j]
+        my $seg = $pad->slice((2 * $half - $j) . ":" . (2 * $half - $j + $nt - 1));
+        $cr += $seg * $wr->at($j);
+        $ci += $seg * $wi->at($j);
+    }
+    return ($cr, $ci);
+}
+{
+    my $sfreq = 500; my $nt = 211;                # prime length
+    my $t = sequence($nt) / $sfreq;
+    my $x = sin(2*$PI*7*$t) + 0.5*cos(2*$PI*41*$t + 1) + ($t - 0.2)**2;
+    my $freqs = pdl(3, 7, 41, 120);               # 3 Hz kernel (743 samples) > signal
+    my $ncyc  = pdl(7, 5, 7, 9);
+    my ($cr, $ci) = cwt_morlet($x, $sfreq, $freqs, n_cycles => $ncyc);
+    my $worst = 0;
+    for my $k (0 .. $freqs->nelem - 1) {
+        my ($dr, $di) = _direct_cwt($x, $sfreq, $freqs->at($k), $ncyc->at($k));
+        my $scale = sqrt($dr**2 + $di**2)->max->sclr;
+        for ([$cr, $dr], [$ci, $di]) {
+            my $e = ($_->[0]->slice("($k),:") - $_->[1])->abs->max->sclr / $scale;
+            $worst = $e if $e > $worst;
+        }
+    }
+    ok($worst < 1e-10, 'cwt_morlet equals direct convolution (rel err < 1e-10)')
+        or diag("worst relative error $worst");
+}
+
+# ---- engine: trials in one pass == one trial at a time; block size --------
+{
+    my $sfreq = 1000; my $nt = 300; my $ne = 7;
+    my $t = sequence($nt) / $sfreq;
+    my $freqs = pdl(20, 45, 90, 180);
+    my $ep = zeroes($ne, $nt);
+    for my $e (0 .. $ne-1) {
+        $ep->slice("($e),:") .= sin(2*$PI*(30 + 11*$e)*$t + 0.7*$e) * (1 + 0.1*$e)
+                              + cos(2*$PI*90*$t) * exp(-(($t-0.15)**2)/(2*0.02**2));
+    }
+    my $sum_p = zeroes($freqs->nelem, $nt);
+    my $sum_r = zeroes($freqs->nelem, $nt); my $sum_i = zeroes($freqs->nelem, $nt);
+    for my $e (0 .. $ne-1) {
+        my ($cr, $ci) = cwt_morlet($ep->slice("($e),:"), $sfreq, $freqs, n_cycles => 6);
+        $sum_p += $cr**2 + $ci**2; $sum_r += $cr; $sum_i += $ci;
+    }
+    my %r = tfr_morlet($ep, $sfreq, $freqs, n_cycles => 6, output => 'all');
+    my $pmax = $r{power}->max->sclr;
+    ok(($r{power} - $sum_p/$ne)->abs->max / $pmax < 1e-12,
+       'tfr_morlet power == mean of per-trial cwt_morlet power');
+    ok(($r{evoked_r} - $sum_r/$ne)->abs->max / sqrt($pmax) < 1e-12
+       && ($r{evoked_i} - $sum_i/$ne)->abs->max / sqrt($pmax) < 1e-12,
+       'tfr_morlet complex mean == mean of per-trial coefficients');
+
+    my $itc = tfr_morlet($ep, $sfreq, $freqs, n_cycles => 6, output => 'itc');
+    my $sl  = tfr_superlet($ep, $sfreq, $freqs, base_cycles => 3, order_min => 1, order_max => 3);
+    my %s   = tfr_stat($ep, $sfreq, $freqs, $t, [0, 0.05], n_cycles => 6);
+    {
+        local $PDL::EEG::TFA::BLOCK_ELEMS = 1;    # one trial per block
+        my %r1 = tfr_morlet($ep, $sfreq, $freqs, n_cycles => 6, output => 'all');
+        my $sl1 = tfr_superlet($ep, $sfreq, $freqs, base_cycles => 3, order_min => 1, order_max => 3);
+        my %s1  = tfr_stat($ep, $sfreq, $freqs, $t, [0, 0.05], n_cycles => 6);
+        ok(($r1{power} - $r{power})->abs->max / $pmax < 1e-12
+           && ($r1{itc} - $itc)->abs->max < 1e-12
+           && ($r1{itc} - $r{itc})->abs->max < 1e-12,
+           'tfr_morlet does not depend on the block size');
+        ok(($sl1 - $sl)->abs->max / $sl->max < 1e-12, 'tfr_superlet does not depend on the block size');
+        ok(($s1{mean} - $s{mean})->abs->max / $s{mean}->abs->max < 1e-10
+           && ($s1{sem} - $s{sem})->abs->max / $s{sem}->max < 1e-10,
+           'tfr_stat does not depend on the block size');
+    }
+}
+
 done_testing();
