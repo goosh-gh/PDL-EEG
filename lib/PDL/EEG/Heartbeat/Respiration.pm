@@ -4,9 +4,9 @@ use strict;
 use warnings;
 use Carp qw(croak);
 use PDL;
-use PDL::FFT;
-use PDL::EEG::Filter    qw(zp_butter analytic_signal);
-use PDL::EEG::Heartbeat qw(beat_epochs);
+use PDL::EEG::FFT::Dispatcher qw(fft_inplace);
+use PDL::EEG::Filter          qw(zp_butter analytic_signal);
+use PDL::EEG::Heartbeat       qw(beat_epochs);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(rr_series r_amplitude resp_phase phase_at phase_locking);
@@ -92,7 +92,7 @@ sub resp_phase {
 
     my $win = 0.5 - 0.5 * cos(2 * $PI * sequence($m) / ($m - 1));
     my ($sr, $si) = ($yg * $win, zeroes(double, $m));
-    fft($sr, $si);
+    fft_inplace($sr, $si);
     my $nh  = int($m / 2);
     my $pw  = ($sr * $sr + $si * $si)->slice("1:$nh");
     my $f   = (sequence($nh) + 1) * $fs / $m;
@@ -209,6 +209,10 @@ signal. Returns a hash reference with the grid times C<t>, the band-passed
 C<series>, the analytic signal C<re>, C<im>, the frequency C<peak_hz> of the
 largest spectral line of the resampled series inside the band, and
 C<band_frac>, the share of the resampled series' power inside the band.
+
+The spectrum for C<peak_hz> and C<band_frac> is taken at the length of the
+grid. When PDL::FFT cannot transform that length, PDL::FFTW3 is used; without
+it the call croaks (L<PDL::EEG::FFT::Dispatcher>).
 
 =item phase_at($ph, $times)
 

@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Carp qw(croak);
 use PDL;
-use PDL::FFT;
+use PDL::EEG::FFT::Dispatcher qw(fft_len fft_inplace ifft_inplace);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(zp_butter analytic_signal envelope inst_phase);
@@ -50,7 +50,7 @@ sub zp_butter {
     $pad = $nt - 1 if $pad > $nt - 1;
     my ($re, $L) = _extend($X, $pad);
     my $im = zeroes(double, $re->dims);
-    fft($re, $im);
+    fft_inplace($re, $im);
 
     my $k = sequence($L);
     my $f = $k * ($fs / $L);
@@ -68,7 +68,7 @@ sub zp_butter {
     }
     my $g = 1 / (1 + ($q * $q) ** $N);                            # (L)
     $re *= $g; $im *= $g;
-    ifft($re, $im);
+    ifft_inplace($re, $im);
 
     my $y = $re->slice("$pad:" . ($pad + $nt - 1))->mv(0, 1)->sever;   # (nch, nt)
     return $nd == 1 ? $y->slice("(0)")->sever : $y;
@@ -84,12 +84,15 @@ sub zp_butter {
 # positive ones doubled, and the result is transformed back.
 #
 # The channel mean is removed first (its Hilbert transform is 0) and the
-# record is followed by zeros up to the next length whose only prime factors
-# are 2, 3 and 5; nothing is added when nt is such a length already.
+# record is followed by zeros up to fft_len(nt) of PDL::EEG::FFT::Dispatcher, the next
+# length whose only prime factors are 2, 3 and 5 and that PDL::FFT transforms
+# correctly; nothing is added when nt is such a length already.
 #
 #   exact => 1    no zeros: one FFT of length nt, the record taken as one
 #                 period. This is scipy.signal.hilbert. PDL::FFT needs time
-#                 proportional to nt^2 when nt has a large prime factor.
+#                 proportional to nt^2 when nt has a large prime factor. When
+#                 PDL::FFT cannot transform length nt, PDL::FFTW3 is used, and
+#                 without it the call croaks (PDL::EEG::FFT::Dispatcher).
 # ---------------------------------------------------------------------------
 sub analytic_signal {
     my ($x, %o) = @_;
@@ -99,12 +102,12 @@ sub analytic_signal {
     my $nt = $X->dim(0);
     croak "analytic_signal: at least 2 samples needed" if $nt < 2;
 
-    my $L    = $o{exact} ? $nt : _fast_len($nt);
+    my $L    = $o{exact} ? $nt : fft_len($nt);
     my $mean = $X->average;                                      # (nch)
     my $re   = zeroes(double, $L, $X->dim(1));
     $re->slice("0:" . ($nt - 1)) .= $X - $mean->dummy(0);
     my $im = zeroes(double, $re->dims);
-    fft($re, $im);
+    fft_inplace($re, $im);
 
     my $h = zeroes(double, $L);                                  # 1, 2, ..., 2, (1), 0, ..., 0
     $h->set(0, 1);
@@ -112,7 +115,7 @@ sub analytic_signal {
     $h->slice("1:" . ($half - 1)) .= 2 if $half > 1;
     $h->set($L / 2, 1) if $L % 2 == 0;
     $re *= $h; $im *= $h;
-    ifft($re, $im);
+    ifft_inplace($re, $im);
 
     my @out = map { $_->slice("0:" . ($nt - 1))->mv(0, 1)->sever } $re, $im;
     $out[0] += $mean->dummy(1);
@@ -146,7 +149,7 @@ sub inst_phase {
 sub _extend {
     my ($X, $pad) = @_;
     my $nt = $X->dim(0);
-    my $L  = _fast_len($nt + 2 * $pad + 16);
+    my $L  = fft_len($nt + 2 * $pad + 16);
     my $ng = $L - $nt - 2 * $pad;                                # join length
 
     my $re = zeroes(double, $L, $X->dim(1));
@@ -164,15 +167,6 @@ sub _extend {
     $re->slice((2 * $pad + $nt) . ":-1")
         .= $last->dummy(0) + ($first - $last)->dummy(0) * $w->dummy(1);
     return ($re, $L);
-}
-
-sub _fast_len {                       # smallest 2^a 3^b 5^c >= n
-    my $n = shift;
-    for (my $m = $n; ; $m++) {
-        my $r = $m;
-        for my $p (2, 3, 5) { $r /= $p while $r % $p == 0 }
-        return $m if $r == 1;
-    }
 }
 
 1;
@@ -200,9 +194,11 @@ layout of C<read_edf>; the output has the shape of the input. Filters that
 combine channels are in L<PDL::EEG::Derivation>, L<PDL::EEG::GED>,
 L<PDL::EEG::ICA> and L<PDL::EEG::Regress>.
 
-All transforms use L<PDL::FFT>. Its running time grows with the square of the
-largest prime factor of the length, so the record is extended to a length
-whose only prime factors are 2, 3 and 5.
+All transforms go through L<PDL::EEG::FFT::Dispatcher>. The running time of L<PDL::FFT>
+grows with the square of the largest prime factor of the length, so the record
+is extended to C<fft_len> of L<PDL::EEG::FFT::Dispatcher>: a length whose only prime
+factors are 2, 3 and 5 and that PDL::FFT transforms correctly (it fails on
+some such lengths, e.g. 354294).
 
 =over 4
 
@@ -221,11 +217,11 @@ or C<3/high>, at most C<nt-1> samples.
 Returns C<($re, $im)>: C<$re> is C<$x> and C<$im> its Hilbert transform.
 
 The channel mean is removed before the transform and the record is followed by
-zeros up to the next length whose only prime factors are 2, 3 and 5; when
-C<nt> is such a length nothing is added. C<< exact => 1 >> transforms the
-record at its own length, as one period of a periodic signal; this is
-C<scipy.signal.hilbert>, and it takes long when C<nt> has a large prime
-factor.
+zeros up to C<fft_len(nt)> (see above); when C<nt> is such a length nothing
+is added. C<< exact => 1 >> transforms the record at its own length, as one
+period of a periodic signal; this is C<scipy.signal.hilbert>, and with
+PDL::FFT it takes long when C<nt> has a large prime factor. For a length
+PDL::FFT cannot transform, PDL::FFTW3 is used; without it the call croaks.
 
 The Hilbert transform is not local. The values near both ends of the record
 depend on what follows the record (zeros, or the record again), in either

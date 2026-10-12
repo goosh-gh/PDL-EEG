@@ -3,7 +3,7 @@ package PDL::EEG::TFA;
 use strict;
 use warnings;
 use PDL;
-use PDL::FFT;
+use PDL::EEG::FFT::Dispatcher qw(fft_len fft_inplace ifft_inplace);
 use Carp qw(croak);
 
 use Exporter 'import';
@@ -17,21 +17,6 @@ our @EXPORT_OK = qw(
 );
 
 my $PI_TFA = 3.14159265358979;
-
-# ------------------------------------------------------------------
-# _fast_len($n) -> smallest 2^a 3^b 5^c >= $n
-#
-# PDL::FFT is a mixed-radix transform: a length with a large prime
-# factor costs time proportional to the square of that factor.
-# ------------------------------------------------------------------
-sub _fast_len {
-    my ($n) = @_;
-    for (my $m = $n; ; $m++) {
-        my $r = $m;
-        for my $p (2, 3, 5) { $r /= $p while $r % $p == 0 }
-        return $m if $r == 1;
-    }
-}
 
 # ------------------------------------------------------------------
 # _half_len($freq, $sfreq, $n_cycles, $sigma_win) -> samples each side
@@ -115,7 +100,7 @@ sub _kernel_fft {
     my $nw = $wr->dim(0);
     my $Wr = zeroes(double, $nfft); $Wr->slice("0:@{[$nw-1]}") .= $wr;
     my $Wi = zeroes(double, $nfft); $Wi->slice("0:@{[$nw-1]}") .= $wi;
-    fft($Wr, $Wi);
+    fft_inplace($Wr, $Wi);
     return ($Wr, $Wi, ($nw - 1) / 2);
 }
 
@@ -156,7 +141,7 @@ sub _cwt_run {
     }
     my $need = $nt + $maxhalf;
     $need = 2 * $maxhalf + 1 if $need < 2 * $maxhalf + 1;
-    my $nfft = _fast_len($need);
+    my $nfft = fft_len($need);
 
     my $block = int($BLOCK_ELEMS / $nfft);
     $block = 1   if $block < 1;
@@ -175,7 +160,7 @@ sub _cwt_run {
         my $Sr = zeroes(double, $nfft, $nb);
         $Sr->slice("0:@{[$nt-1]}") .= $sig->slice(":,$s0:$s1");
         my $Si = zeroes(double, $nfft, $nb);
-        fft($Sr, $Si);
+        fft_inplace($Sr, $Si);
 
         for my $k (0 .. $nspec - 1) {
             my ($Wr, $Wi, $half);
@@ -188,7 +173,7 @@ sub _cwt_run {
             }
             my $Pr = $Sr * $Wr - $Si * $Wi;
             my $Pi = $Sr * $Wi + $Si * $Wr;
-            ifft($Pr, $Pi);
+            ifft_inplace($Pr, $Pi);
             my $win = "$half:@{[$half + $nt - 1]}";
             $cb->($k, $Pr->slice($win), $Pi->slice($win), $s0);
         }
@@ -534,7 +519,7 @@ PDL::EEG::TFA - continuous complex-Morlet time-frequency analysis in PDL
 Renderer- and IO-independent time-frequency engine: complex Morlet
 continuous wavelet transform, trial-averaged power and inter-trial
 coherence, and per-frequency baseline normalisation.  Convolution is
-carried out in the frequency domain via C<PDL::FFT>.
+carried out in the frequency domain via L<PDL::EEG::FFT::Dispatcher>.
 
 =head1 FUNCTIONS
 
@@ -600,8 +585,9 @@ The signal is transformed once by zero-padded FFT and the result is
 reused for every frequency; each frequency multiplies it by the FFT of
 its wavelet and transforms back, and the central C<ntime> samples of the
 linear convolution are kept ("same" mode).  One FFT length is used for
-all frequencies: the smallest product of powers of 2, 3 and 5 that is at
-least C<ntime> plus the half-length of the longest kernel.  Because the
+all frequencies: C<fft_len> of L<PDL::EEG::FFT::Dispatcher> of C<ntime> plus the
+half-length of the longest kernel, the smallest product of powers of 2, 3
+and 5 at least that long that PDL::FFT transforms correctly.  Because the
 padding is with zeros, coefficients within half a kernel length of either
 edge are affected by the signal boundary.
 
