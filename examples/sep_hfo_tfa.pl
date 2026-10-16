@@ -28,6 +28,7 @@ use strict;
 use warnings;
 use PDL;
 use PDL::EEG::TFA qw(tfr_morlet tfr_superlet tfr_stat apply_baseline);
+use PDL::EEG::SynthNoise qw(seed_rng);
 use Getopt::Long;
 use POSIX qw(ceil);
 
@@ -562,7 +563,7 @@ sub synth_epochs {
     my $ne    = 200;
     my $nt    = int(($tmax - $tmin) * $sfreq) + 1;
     my $t     = $tmin + sequence($nt) / $sfreq;
-    srand(7);
+    seed_rng(7);
     my $ep = zeroes(double, $ne, $nt);
     for my $e (0 .. $ne - 1) {
         my $n20 = 6   * exp(-(($t-0.020)**2)/(2*0.004**2))  * sin(2*$PI*45*($t-0.020));

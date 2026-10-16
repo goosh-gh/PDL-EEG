@@ -2,13 +2,14 @@ use strict; use warnings;
 use Test::More;
 use PDL;
 use FindBin; use lib "$FindBin::Bin/../lib";
-use PDL::EEG::ICA qw(ica_decompose apply_ica);
+use PDL::EEG::ICA qw(ica_decompose apply_ica fastica);
+use PDL::EEG::SynthNoise qw(seed_rng);
 
 sub sd  { my $x=shift; my $x0=$x-$x->avg; sqrt(($x0*$x0)->avg) }
 sub cor { my($a,$b)=@_; my $a0=$a-$a->avg; my $b0=$b-$b->avg;
           (($a0*$b0)->avg)/(sd($a)*sd($b)+1e-30) }
 
-srand(7);
+seed_rng(7);
 my $N = 4000; my $k = 4;
 my $t = sequence($N)/$N;
 # 4 independent sources: laplacian(super-G), uniform(sub-G), sinusoid, sparse spikes
@@ -48,5 +49,17 @@ ok($err0 < 1e-6, "remove-none reconstruction is identity (max err=".sprintf('%.2
 my $Xrec = ($ica->{mix} x $ica->{sources}) + $ica->{mean}->dummy(0);
 my $err1 = ($Xrec-$X)->abs->max->sclr;
 ok($err1 < 1e-6, "mix x sources + mean reconstructs X (max err=".sprintf('%.2e',$err1).")");
+
+# seed => n fixes the starting rotation (a bare srand did not seed PDL 2.090+)
+{
+    my $Z = PDL::EEG::ICA::whiten($X)->{Z};
+    my ($B1) = fastica($Z, seed => 1, maxit => 1);
+    my ($B2) = fastica($Z, seed => 1, maxit => 1);
+    my ($B3) = fastica($Z, seed => 2, maxit => 1);
+    ok(all($B1 == $B2), 'fastica: same seed, same start');
+    ok(any($B1 != $B3), 'fastica: different seed, different start');
+    my $ica2 = ica_decompose($X, nl=>'tanh', seed=>1);
+    ok(all($ica2->{unmix} == $ica->{unmix}), 'ica_decompose: same seed, same unmixing matrix');
+}
 
 done_testing();

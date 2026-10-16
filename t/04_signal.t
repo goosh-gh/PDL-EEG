@@ -3,6 +3,7 @@ use warnings;
 use Test::More;
 use PDL;
 use PDL::EEG::Signal qw(detect_square_pulses);
+use PDL::EEG::SynthNoise qw(seed_rng);
 
 # ---------------------------------------------------------------------------
 # Synthetic recording:
@@ -13,7 +14,7 @@ use PDL::EEG::Signal qw(detect_square_pulses);
 # ---------------------------------------------------------------------------
 
 my $n_samp = 2000;
-srandom(42);
+seed_rng(42);
 
 my @rows;
 # 20 EEG channels, sigma 15..60

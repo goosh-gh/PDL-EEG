@@ -3,8 +3,9 @@ use Test::More;
 use PDL;
 use FindBin; use lib "$FindBin::Bin/../lib";
 use PDL::EEG::Regress qw(regress_out);
+use PDL::EEG::SynthNoise qw(seed_rng);
 
-srand(7);
+seed_rng(7);
 my $nt = 4000; my $nch = 6;
 my $t  = sequence($nt) / 200;
 # two artifact sources + independent brain per channel

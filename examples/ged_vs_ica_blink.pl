@@ -3,6 +3,7 @@ use PDL; use PDL::MatrixOps;
 use FindBin; use lib "$FindBin::Bin/../lib";
 use PDL::EEG::ICA qw(ica_decompose identify_by_reference inv_sqrt_sym);
 use PDL::EEG::Linalg qw(eigh_sym);
+use PDL::EEG::SynthNoise qw(seed_rng gaussian synth_noise);
 
 sub sd  { my $x=shift; my $x0=$x-$x->avg; sqrt(($x0*$x0)->avg) }
 sub cor { my($a,$b)=@_; my $a0=$a-$a->avg; my $b0=$b-$b->avg;
@@ -10,7 +11,7 @@ sub cor { my($a,$b)=@_; my $a0=$a-$a->avg; my $b0=$b-$b->avg;
 sub fro { my $x=shift; sqrt(($x*$x)->sum) }         # Frobenius norm
 
 # ============ synthetic EEG with a KNOWN blink ==================
-srand(11);
+seed_rng(11);                                      # PDL grandom/random and CORE::rand
 my $fs = 1000; my $N = 60*$fs; my $nch = 19;
 my $t = sequence($N)/$fs;
 
@@ -18,12 +19,8 @@ my $t = sequence($N)/$fs;
 my $nsrc = 6;
 my $BG = zeroes($N,$nch);
 for my $s (0..$nsrc-1){
-    my $e = grandom($N); my $a = 0.95;             # AR(1)
-    my $x = $e->copy;
-    my $xx = $x->list ? [$x->list] : [];
-    for my $i (1..$N-1){ $xx->[$i] += $a*$xx->[$i-1]; }
-    my $src = pdl($xx); $src -= $src->avg; $src /= sd($src);
-    my $map = grandom($nch); $map -= $map->avg;    # random spatial pattern
+    my $src = synth_noise($N, kind => 'ar1', ar => 0.95);   # zero mean, SD 1
+    my $map = gaussian($nch); $map -= $map->avg;   # random spatial pattern
     $BG += $src->dummy(1) * $map->dummy(0);
 }
 $BG -= $BG->average->dummy(0);                     # zero-mean per channel
@@ -40,7 +37,7 @@ my $nblink = 45;
 my @onsets;
 for (1..$nblink){
     my $on = int(rand($N-$bump_w));
-    my $amp = exp(0.6*grandom(1)->sclr) * 6;        # lognormal amps -> big outliers
+    my $amp = exp(0.6*gaussian(1)->sclr) * 6;       # lognormal amps -> big outliers
     $btc->slice($on.":".($on+$bump_w-1)) += $bump*$amp;
     push @onsets, $on;
 }
@@ -49,7 +46,7 @@ my $BLINK = $btc->dummy(1) * $atopo->dummy(0);      # (N,nch)
 
 # scale blink so it's a strong but not total contributor
 $BLINK *= 3.0 / sd($BLINK->flat);
-my $noise = grandom($N,$nch)*0.15;
+my $noise = gaussian($N,$nch)*0.15;                # 1.14M values: grandom would split them across threads
 my $X = $BG + $BLINK + $noise;
 
 print "== data ==  N=$N nch=$nch  blinks=$nblink\n";

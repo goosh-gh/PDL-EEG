@@ -13,19 +13,22 @@ use Test::More;
 # (-> R). A correct GED must then (1) be biorthogonal, (2) place the blink in a
 # single dominant component, (3) recover a as that component's pattern, and
 # (4) remove a x b while leaving the background untouched.
-# Fully deterministic (no RNG / no seeding).
+# Random numbers come from PDL::EEG::SynthNoise with fixed seeds, so the
+# data are the same on every run and every machine.
 
-use_ok('PDL::EEG::GED');
-use PDL::EEG::GED qw(ged_cov ged_operator apply_ged);
+eval { require PDL::EEG::GED; PDL::EEG::GED->import(qw(ged_cov ged_operator apply_ged)); 1 }
+    or plan skip_all => "PDL::EEG::GED not loadable (needs PDL::LinearAlgebra): $@";
+use PDL::EEG::SynthNoise qw(seed_rng gaussian);
 
 my ($nch,$nsrc,$nt) = (32,6,6000);
 my $pi = 4*atan2(1,1);
 
-# deterministic pseudo-uniform (-0.5,0.5) matrix (name avoids PDL's det())
+# (d0,d1) of N(0, 1/12) from a fixed seed: the SD (0.289) of uniform(-0.5,0.5),
+# which this test used before, so the blink-to-background ratio is unchanged
 sub synth {
     my ($d0,$d1,$seed) = @_;
-    my $x = sin((sequence($d0*$d1)+1)*0.12345 + $seed*7.13) * 43758.5453;
-    return ($x - floor($x) - 0.5)->reshape($d0,$d1);
+    seed_rng($seed);
+    return gaussian($d0,$d1) * sqrt(1/12);
 }
 
 my $ax = sequence($nch);

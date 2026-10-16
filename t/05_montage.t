@@ -4,6 +4,7 @@ use Test::More;
 use PDL;
 use PDL::EEG::IO::NihonKohden::Montage qw(montage_from_log resolve_labels);
 use File::Temp qw(tempdir);
+use PDL::EEG::SynthNoise qw(seed_rng);
 
 # --- montage_from_log -------------------------------------------------------
 is(montage_from_log([
@@ -49,7 +50,7 @@ open my $fh, '>:raw', "$dir/Pattern_001.PTN" or die $!;
 print {$fh} build_ptn(); close $fh;
 
 # --- synthetic record: 6 EEG + 4 trigger channels, known ch_indices ---------
-my $n = 2000; srandom(7);
+my $n = 2000; seed_rng(7);
 my @rows;
 push @rows, grandom($n) * (15 + 8 * $_) for 0 .. 5;      # 6 EEG (small ranges)
 for my $k (0 .. 3) {                                       # 4 triggers

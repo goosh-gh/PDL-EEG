@@ -2,6 +2,7 @@ use strict;
 use warnings;
 use Test::More;
 use PDL;
+use PDL::EEG::SynthNoise qw(seed_rng);
 
 BEGIN { use_ok('PDL::EEG::TFA', qw(morlet_wavelet cwt_morlet tfr_morlet tfr_superlet tfr_stat apply_baseline)); }
 
@@ -51,7 +52,7 @@ my $PI = 4 * atan2(1, 1);
     my $t = sequence($nt) / $sfreq;
     my $freqs = pdl(60, 120, 200);
     my $env = exp(-(($t-0.5)**2)/(2*0.02**2));
-    srand(1);
+    seed_rng(1);
     my $locked = zeroes($ne,$nt); my $rand = zeroes($ne,$nt);
     for my $e (0..$ne-1) {
         $locked->slice("($e),:") .= $env * sin(2*$PI*120*$t);
@@ -99,7 +100,7 @@ my $PI = 4 * atan2(1, 1);
     my $sfreq = 2000; my $nt = 400; my $ne = 200;
     my $t = (sequence($nt) - 100) / $sfreq;             # -0.05 .. 0.15 s
     my $freqs = pdl(100, 150, 200, 275, 400);
-    srand(3);
+    seed_rng(3);
     my $ep = zeroes($ne, $nt);
     for my $e (0 .. $ne-1) {
         my $burst   = 3   * exp(-(($t-0.040)**2)/(2*0.004**2)) * sin(2*$PI*275*$t);
@@ -121,7 +122,7 @@ my $PI = 4 * atan2(1, 1);
     my $sfreq = 2000; my $nt = 400; my $ne = 300;
     my $t = (sequence($nt) - 80) / $sfreq;
     my $freqs = pdl(100, 150, 200, 250, 300);
-    srand(9);
+    seed_rng(9);
     my $ep = zeroes($ne, $nt);
     for my $e (0 .. $ne-1) {
         my $env = exp(-(($t-0.040)**2)/(2*0.004**2));

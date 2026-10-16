@@ -2,6 +2,21 @@ Revision history for PDL-EEG
 
 0.05  (unreleased)
   CHANGED
+    - Tests and examples seed through PDL::EEG::SynthNoise::seed_rng
+      (t/04, t/05, t/16, t/19, t/21, examples/sep_hfo_tfa.pl,
+      examples/ged_vs_ica_blink.pl). A bare srand seeds PDL's generator
+      only before PDL 2.090, so these were different on every run with
+      PDL 2.104; t/04 and t/05 called srandom, which PDL 2.085 does not
+      have.
+    - t/18_ged.t: the background is seeded N(0, 1/12) noise (was a
+      sin-based pseudo-uniform sequence with the same SD); skips instead
+      of failing when PDL::LinearAlgebra is not installed.
+    - t/28_detect_blinks.t: the trace noise is seeded white uniform noise
+      with SD 2 (was sequence % 7 - 3, also SD 2 and bounded).
+    - examples/ged_vs_ica_blink.pl: the AR(1) background sources come from
+      synth_noise (was a per-sample Perl loop); its white noise is drawn
+      with gaussian(), so the output is the same with any number of CPU
+      threads.
     - PDL::EEG::GED::detect_blinks: the end of each supra-threshold run is
       found for all runs at once (which / vsearch) instead of one sample at
       a time; same peaks. macOS, 10 min of synthetic vEOG: 82 ms -> 71 ms.
@@ -56,6 +71,17 @@ Revision history for PDL-EEG
       time-domain convolution, trials together vs one at a time, block
       size independence.
   ADDED
+    - PDL::EEG::SynthNoise: synth_noise (white or AR(1), Gaussian or
+      uniform innovations, one or several independent channels, each
+      zero-mean with an exact SD), seed_rng (PDL srandom / srand by PDL
+      version, plus CORE::srand), gaussian / uniform (grandom / random with
+      automatic threading off: above 1M elements PDL fills an array from
+      one random state per thread, so the numbers depended on the number
+      of threads). t/30_synthnoise.t: AR(1) against a plain Perl loop on
+      every sample (several blocks, phi from -0.5 to 0.9999), exact mean
+      and SD, same numbers with 1, 2, 4 and 8 threads, uniform white noise
+      below 2.5 x 1.4826 x MAD for 10 seeds with Gaussian and AR(1) noise
+      as negative controls.
     - PDL::EEG::Linalg: eigh_sym (symmetric eigendecomposition, values
       ascending, vectors in columns) through LAPACK syevd
       (PDL::LinearAlgebra msymeigen, 0.436 or later) when installed, and
@@ -112,6 +138,11 @@ Revision history for PDL-EEG
       functions (morlet_wavelet, cwt_morlet, tfr_morlet, tfr_superlet,
       tfr_stat, apply_baseline) from the implementation and t/16_tfa.t.
   FIXED
+    - PDL::EEG::ICA::fastica (and ica_decompose): seed => n had no effect
+      with PDL 2.090 and later (it called srand, which no longer seeds
+      PDL's generator), so the starting rotation changed on every run. It
+      now calls seed_rng. t/21_ica.t checks that the same seed gives the
+      same start and the same unmixing matrix.
     - PDL::EEG::GED::detect_blinks returned [0] (one peak at sample 0) when
       nothing crossed the threshold; it now returns an empty piddle.
     - NihonKohden wfmblock: channel-table off-by-one (electrode code was read

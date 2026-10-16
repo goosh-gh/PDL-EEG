@@ -5,6 +5,7 @@ use PDL;
 
 eval { require PDL::EEG::GED; PDL::EEG::GED->import('detect_blinks'); 1 }
     or plan skip_all => "PDL::EEG::GED not loadable (needs PDL::LinearAlgebra): $@";
+use PDL::EEG::SynthNoise qw(synth_noise);
 
 # Reference written from the description of detect_blinks, in plain Perl arrays:
 #   supra-threshold samples: |v - mean(v)| > thresh_k * 1.4826 * MAD
@@ -37,10 +38,14 @@ sub ref_detect {
     return @pk;
 }
 
-# a quiet trace with bumps of given (start, length, height)
+# a quiet trace with bumps of given (start, length, height).
+# The noise is white uniform with SD 2 (|v| <= about 3.5): bounded, so on its
+# own it never crosses 2.5 x 1.4826 x MAD (see PDL::EEG::SynthNoise). Each trace
+# gets its own fixed seed.
+my $trace_seed = 280;
 sub trace {
     my ($nt, @bumps) = @_;
-    my $v = (sequence($nt) % 7 - 3) * 1.0;           # deterministic noise, |v| <= 3
+    my $v = synth_noise($nt, dist => 'uniform', sd => 2, seed => $trace_seed++);
     for my $b3 (@bumps) {
         my ($s, $len, $h) = @$b3;
         my $x = sequence($len);

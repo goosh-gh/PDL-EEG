@@ -4,6 +4,7 @@ use warnings;
 use PDL;
 use PDL::MatrixOps;
 use PDL::EEG::Linalg qw(eigh_sym);   # LAPACK syevd if PDL::LinearAlgebra is installed
+use PDL::EEG::SynthNoise qw(seed_rng gaussian);
 use Exporter 'import';
 
 our @EXPORT_OK = qw(
@@ -95,9 +96,11 @@ sub fastica {
     my $maxit = $o{maxit} // 300;
     my $tol   = $o{tol}   // 1e-9;
     my $nl    = $o{nl}    // 'tanh';
-    srand($o{seed}) if defined $o{seed};   # PDL exports srand; do NOT use PDL::srand (not a package sub in all builds)
+    # A bare srand seeds PDL's generator only before PDL 2.090 (PDL::srandom
+    # after); seed_rng calls whichever exists.
+    seed_rng($o{seed}) if defined $o{seed};
 
-    my $B = sym_orth(grandom($k, $k));
+    my $B = sym_orth(gaussian($k, $k));
     my ($it, $conv) = (0, -1);
     for my $i (1 .. $maxit) {
         $it = $i;
