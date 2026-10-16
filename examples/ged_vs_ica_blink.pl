@@ -2,6 +2,7 @@ use strict; use warnings;
 use PDL; use PDL::MatrixOps;
 use FindBin; use lib "$FindBin::Bin/../lib";
 use PDL::EEG::ICA qw(ica_decompose identify_by_reference inv_sqrt_sym);
+use PDL::EEG::Linalg qw(eigh_sym);
 
 sub sd  { my $x=shift; my $x0=$x-$x->avg; sqrt(($x0*$x0)->avg) }
 sub cor { my($a,$b)=@_; my $a0=$a-$a->avg; my $b0=$b-$b->avg;
@@ -64,7 +65,7 @@ printf "peri samples=%d  free samples=%d\n\n", $ip->nelem, $if->nelem;
 
 sub chan_cov { my ($M)=@_; my $Mc=$M-$M->average->dummy(0); ($Mc x $Mc->transpose)/$M->dim(0) }
 
-# ============ GED (R-whitening route, eigens_sym only) ==========
+# ============ GED (R-whitening route, symmetric eigensolver only) ==========
 my $Xperi = $X->dice_axis(0,$ip);
 my $Xfree = $X->dice_axis(0,$if);
 my $S = chan_cov($Xperi);
@@ -74,7 +75,7 @@ my $lam = 0.05; my $trace = $R->diagonal(0,1)->avg;
 $R = (1-$lam)*$R + $lam*$trace*identity($nch);
 my $Rih = inv_sqrt_sym($R);
 my $St  = $Rih x $S x $Rih;                         # symmetric
-my ($V,$th) = eigens_sym($St);
+my ($th,$V) = eigh_sym($St);                        # values, vectors (columns)
 my $ord = $th->qsorti->slice('-1:0');               # descending
 $th = $th->index($ord); $V = $V->dice_axis(0,$ord);
 my $Wged = $Rih x $V;                               # filters, columns (dim0=comp)

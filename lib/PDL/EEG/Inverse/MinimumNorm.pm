@@ -1,7 +1,8 @@
 package PDL::EEG::Inverse::MinimumNorm;
 use strict; use warnings;
 use PDL;
-use PDL::MatrixOps qw(identity eigens_sym stretcher);  # symmetric pinv, no LA dependency
+use PDL::MatrixOps qw(identity stretcher);
+use PDL::EEG::Linalg qw(eigh_sym);   # LAPACK syevd if PDL::LinearAlgebra is installed
 use Exporter 'import';
 our @EXPORT_OK = qw(
     forward_project centering
@@ -30,7 +31,7 @@ our @EXPORT_OK = qw(
 sub _pinv {
     my ($C, $rcond) = @_;
     $rcond //= 1e-9;
-    my ($ev, $e) = eigens_sym($C);
+    my ($e, $ev) = eigh_sym($C);           # values, vectors (columns)
     my $tol  = $rcond * $e->abs->max;
     my $keep = ($e->abs > $tol);
     my $einv = $keep * (1.0/($e + (1-$keep)));   # 1/e where kept, 0 in null space

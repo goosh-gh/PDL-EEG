@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use PDL;
 use PDL::MatrixOps;
+use PDL::EEG::Linalg qw(eigh_sym);   # LAPACK syevd if PDL::LinearAlgebra is installed
 use Exporter 'import';
 
 our @EXPORT_OK = qw(
@@ -24,7 +25,7 @@ our @EXPORT_OK = qw(
 # symmetric matrix inverse square root, via eigen-decomposition
 sub inv_sqrt_sym {
     my ($M) = @_;
-    my ($U, $s) = eigens_sym($M);
+    my ($s, $U) = eigh_sym($M);              # values, vectors (columns)
     my $is = $s->clip(1e-15, undef) ** -0.5;
     my $D = zeroes($M->dim(0), $M->dim(0));
     $D->diagonal(0,1) .= $is;
@@ -52,7 +53,7 @@ sub whiten {
     my $mean = $X->average;                    # (nch), mean over time
     my $Xc = $X - $mean->dummy(0);
     my $C = ($Xc x $Xc->transpose) / $nt;      # (nch,nch)
-    my ($E, $l) = eigens_sym($C);              # E columns = eigenvectors
+    my ($l, $E) = eigh_sym($C);                # E columns = eigenvectors
 
     # sort eigenvalues descending
     my $ord = $l->qsorti->slice('-1:0');
@@ -190,7 +191,9 @@ PDL::EEG::ICA - FastICA blind source separation for EEG artifact removal (pure P
 
 Symmetric fixed-point FastICA (Hyvarinen) on PCA-whitened multichannel EEG,
 with reference-based component identification and back-projection removal.
-Uses only PDL::MatrixOps (LAPACK not required). Data layout is (nt, nch),
+The eigendecompositions (whitening, symmetric orthogonalization) go through
+L<PDL::EEG::Linalg>: LAPACK C<syevd> when PDL::LinearAlgebra 0.436 or later is
+installed, PDL::MatrixOps C<eigens_sym> (with one warning) otherwise. Data layout is (nt, nch),
 matching PDL::EEG::GED. Removal is X - mix[:,bad] (unmix[bad,:] Xc), the same
 back-projection form used by the GED spatial filter, so the two methods are
 directly comparable on identical data and metrics.

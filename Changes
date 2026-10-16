@@ -2,6 +2,17 @@ Revision history for PDL-EEG
 
 0.05  (unreleased)
   CHANGED
+    - PDL::EEG::ICA and PDL::EEG::Inverse::MinimumNorm: the symmetric
+      eigendecompositions (whitening, symmetric orthogonalization, the
+      pseudoinverse of the electrode Gram matrix) use PDL::EEG::Linalg
+      eigh_sym, i.e. LAPACK syevd when PDL::LinearAlgebra 0.436 or later is
+      installed (was PDL::MatrixOps eigens_sym always). inverse_operator
+      agrees with the previous version to 1e-11 relative (T and std; MNE,
+      sLORETA, eLORETA; 19, 64, 231 electrodes x 4000 sources). 231
+      electrodes, macOS, Apple M5 Pro, PDL 2.104, Accelerate: MNE 43 ms ->
+      7 ms, eLORETA 1.5 s -> 0.2 s; Linux, netlib LAPACK: MNE 194 ms ->
+      37 ms, eLORETA 6.4 s -> 0.9 s. examples/ged_vs_ica_blink.pl uses
+      eigh_sym.
     - PDL::EEG::MAP2D::interpolate_topo keeps, per layout (positions, res,
       clip, extent, anchors), the matrix from sensor values to grid values,
       so a new latency on the same layout is one matrix-vector product
@@ -29,6 +40,14 @@ Revision history for PDL-EEG
       time-domain convolution, trials together vs one at a time, block
       size independence.
   ADDED
+    - PDL::EEG::Linalg: eigh_sym (symmetric eigendecomposition, values
+      ascending, vectors in columns) through LAPACK syevd
+      (PDL::LinearAlgebra msymeigen, 0.436 or later) when installed, and
+      PDL::MatrixOps eigens_sym otherwise, with one warning per process
+      ($QUIET silences it, $USE_LAPACK = 0 selects eigens_sym);
+      linalg_backend names the solver in use. t/27_linalg.t (ground truth
+      from Givens rotations and known eigenvalues, both solvers, negative
+      control, the warning).
     - PDL::EEG::GED: generic GED spatial filter (ged_cov / ged_operator /
       apply_ged; S w = lambda R w via PDL::LinearAlgebra sygvd, R-orthonormal
       filters, biorthogonal patterns A = R W, shrinkage regularisation on R)
