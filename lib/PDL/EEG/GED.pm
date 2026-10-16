@@ -107,10 +107,18 @@ sub detect_blinks {
     my $mask = ($mag > $thr);
     my $nt   = $veog->nelem;
     my $rise = which(($mask == 1) & ($mask->rotate(1) == 0));
+    return zeroes(long, 0) if $rise->nelem == 0;     # no peaks: empty (pdl(long, ()) is [0])
+    # end of each supra-threshold run: last sample before the mask drops (or nt-1).
+    # The run starting at a rise ends at the first run end at or after it.
+    my $next = $mask->rotate(-1)->copy; $next->set($nt - 1, 0);
+    my $ends = which(($mask == 1) & ($next == 0));
+    my $end_of_rise = $ends->index(vsearch_insert_leftmost($rise, $ends));
+    my @rise = $rise->list;
+    my @end  = $end_of_rise->list;
     my (@pk); my $last = -1e9;
-    for my $s ($rise->list) {
+    for my $i (0 .. $#rise) {
+        my ($s, $e) = ($rise[$i], $end[$i]);
         next if $s - $last < $refr;
-        my $e = $s; $e++ while $e < $nt - 1 && $mask->at($e + 1);
         push @pk, $s + $mag->slice("$s:$e")->maximum_ind->sclr;
         $last = $pk[-1];
     }

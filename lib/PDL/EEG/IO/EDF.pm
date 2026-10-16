@@ -339,7 +339,9 @@ sub write_edf {
     # --- per-channel physical/digital ranges -------------------------------
     my $DMIN = -32768;
     my $DMAX =  32767;
-    my (@pmin, @pmax, @dig);                      # @dig: padded short piddles
+    my (@pmin, @pmax);
+    # digital samples in file order: (spr, n_ch, n_rec) = each record, channel after channel
+    my $recs = zeroes(short, $spr, $n_ch, $n_rec);
     for my $c (0 .. $n_ch - 1) {
         # express this signal in ITS declared dimension (µV / uvper). For a µV
         # channel uvper is 1 and nothing changes; for a DC channel written in mV
@@ -360,17 +362,23 @@ sub write_edf {
             $pmn = -$r; $pmx = $r;
         }
         my $scale = ($DMAX - $DMIN) / ($pmx - $pmn);
-        my $d = ((($ch - $pmn) * $scale) + $DMIN)->rint;
-        my $nclip = ($d < $DMIN)->sum + ($d > $DMAX)->sum;
-        carp sprintf("write_edf: channel %d (%s): %d sample(s) clipped to +/-32k",
-                     $c, $labels[$c], $nclip) if $nclip;
-        $d = $d->clip($DMIN, $DMAX);
+        my $d = $ch - $pmn;                       # double (Perl scalar operand)
+        $d *= $scale; $d += $DMIN; $d->inplace->rint;
+        my ($dlo, $dhi) = $d->minmax;
+        if ($dlo < $DMIN || $dhi > $DMAX) {
+            my $nclip = ($d < $DMIN)->sum + ($d > $DMAX)->sum;
+            carp sprintf("write_edf: channel %d (%s): %d sample(s) clipped to +/-32k",
+                         $c, $labels[$c], $nclip);
+            $d->inplace->clip($DMIN, $DMAX);
+        }
         # pad to n_rec*spr with the digital code nearest physical 0
         my $zero = sprintf('%.0f', (0 - $pmn) * $scale + $DMIN);
         $zero = $DMIN if $zero < $DMIN; $zero = $DMAX if $zero > $DMAX;
-        my $full = zeroes(short, $n_rec * $spr) + $zero;
-        $full->slice("0:" . ($n_s - 1)) .= $d->short;
-        push @pmin, $pmn; push @pmax, $pmx; push @dig, $full;
+        # this channel's rows of the data records, (spr, n_rec) -> n_rec*spr samples
+        my $dst = $recs->slice(":,($c),:")->clump(-1);
+        $dst .= $zero;
+        $dst->slice("0:" . ($n_s - 1)) .= $d;
+        push @pmin, $pmn; push @pmax, $pmx;
     }
 
     # --- annotations per record (EDF+ only) --------------------------------
@@ -497,17 +505,18 @@ sub write_edf {
     open my $fh, '>:raw', $path or croak "write_edf: cannot open $path: $!";
     print {$fh} $hdr;
 
-    for my $r (0 .. $n_rec - 1) {
-        my $lo = $r * $spr;
-        my $hi = $lo + $spr - 1;
-        for my $c (0 .. $n_ch - 1) {
-            print {$fh} ${ $dig[$c]->slice("$lo:$hi")->short->sever->get_dataref };
-        }
-        if ($plus) {
+    # data records: $recs holds them in file order already
+    my $sig  = ${ $recs->get_dataref };
+    if ($plus) {
+        my $rbytes = 2 * $spr * $n_ch;
+        for my $r (0 .. $n_rec - 1) {
             my $tal = $rec_tal[$r];
             $tal .= "\x00" x ($annot_spr * 2 - length $tal);
-            print {$fh} $tal;
+            print {$fh} substr($sig, $r * $rbytes, $rbytes), $tal;
         }
+    }
+    else {
+        print {$fh} $sig;
     }
     close $fh or croak "write_edf: close failed: $!";
     return $path;
@@ -575,27 +584,43 @@ sub read_edf {
 
     # read all data records; concatenate each signal's raw int16 bytes (no
     # per-sample Perl lists), annotation bytes separately.
+    # Only complete records are used (a short last record is dropped).
     my $rec_samples = 0; $rec_samples += $_ for @spr;
-    my @sigbytes = ('') x $ns;
-    my @annbytes;
-    for my $r (0 .. $nrec-1) {
-        my $rb; my $got = read($fh, $rb, $rec_samples*2);
-        last unless defined $got && $got >= $rec_samples*2;
-        my $p = 0;
-        for my $s (0..$ns-1) {
-            my $cnt = $spr[$s];
-            if ($label[$s] eq 'EDF Annotations') {
-                push @annbytes, substr($rb, $p*2, $cnt*2);
-            } else {
-                $sigbytes[$s] .= substr($rb, $p*2, $cnt*2);
-            }
-            $p += $cnt;
-        }
+    my $rbytes = 2 * $rec_samples;
+    my $body = '';
+    if ($nrec > 0) {
+        my $got = read($fh, $body, $nrec * $rbytes);
+        $body = '' unless defined $got;
     }
     close $fh;
+    my $n_full = int(length($body) / $rbytes);
+    $n_full = $nrec if $n_full > $nrec;
 
-    # build [n_ch, n_samp] float piddle in uV; interpret each signal's bytes
-    # directly as int16 LE via get_dataref (~90x faster than unpack->pdl), scale.
+    # the whole data block as (samples per record, record) int16; each signal is
+    # its rows of every record, in record order.
+    my @offset; { my $p = 0; for my $s (0 .. $ns-1) { push @offset, $p; $p += $spr[$s] } }
+    my $raw;
+    if ($n_full > 0) {
+        $raw = zeroes(short, $rec_samples, $n_full);
+        ${ $raw->get_dataref } = substr($body, 0, $n_full * $rbytes);
+        $raw->upd_data;
+    }
+    my @annbytes;
+    for my $r (0 .. $n_full - 1) {        # record order, as stored
+        for my $s (@annot) {
+            push @annbytes, substr($body, $r * $rbytes + 2 * $offset[$s], 2 * $spr[$s]);
+        }
+    }
+    undef $body;
+    my $signal = sub {                    # int16 samples of signal $s, all records
+        my ($s) = @_;
+        return zeroes(short, 0) unless $n_full > 0;
+        my ($lo, $hi) = ($offset[$s], $offset[$s] + $spr[$s] - 1);
+        return $raw->slice("$lo:$hi,:")->clump(-1);
+    };
+
+    # build [n_ch, n_samp] float piddle in uV from each signal's int16 samples
+    # (the data block was read into one piddle via get_dataref), scale.
     #
     # The physical dimension is PER SIGNAL and must be honoured. A DC channel is
     # written in mV (it cannot be written in µV: EDF's physical_min is 8 ASCII
@@ -605,7 +630,7 @@ sub read_edf {
     # dimension each signal was stored in via {units}.
     my %UV_PER = ('uV' => 1, 'uv' => 1, 'µV' => 1, 'mV' => 1_000, 'mv' => 1_000);
     my $n_ch   = scalar @sig;
-    my $n_samp = length($sigbytes[$sig[0]]) / 2;
+    my $n_samp = $n_full * $spr[$sig[0]];
     my $data   = zeroes(float, $n_ch, $n_samp);
     my (@labels, @units);
     for my $i (0 .. $#sig) {
@@ -615,9 +640,7 @@ sub read_edf {
         my $uvp  = $UV_PER{ $pdim[$s] // 'uV' } // 1;      # unknown dim -> as-is
         my $dd   = ($dmax[$s] - $dmin[$s]);
         my $gain = $dd ? ($pmax[$s] - $pmin[$s]) / $dd : 1;
-        my $col  = zeroes(short, length($sigbytes[$s]) / 2);
-        ${ $col->get_dataref } = $sigbytes[$s];
-        $col->upd_data;
+        my $col  = $signal->($s);
         $data->slice("($i),:") .=
             (($col->float - $dmin[$s]) * $gain + $pmin[$s]) * $uvp;
     }

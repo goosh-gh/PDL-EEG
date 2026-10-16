@@ -2,6 +2,22 @@ Revision history for PDL-EEG
 
 0.05  (unreleased)
   CHANGED
+    - PDL::EEG::GED::detect_blinks: the end of each supra-threshold run is
+      found for all runs at once (which / vsearch) instead of one sample at
+      a time; same peaks. macOS, 10 min of synthetic vEOG: 82 ms -> 71 ms.
+      t/28_detect_blinks.t (reference written from the description in plain
+      Perl: runs at the start, the end and both ends, refractory, one-sample
+      runs, random trains).
+    - PDL::EEG::IO::EDF write_edf / read_edf: no loop over records x
+      channels; the data records are built and read as one int16 array.
+      Same output: written files and read data, labels, units and events
+      byte for byte equal to the previous version (t/29_edf_layout.t
+      cases, 30 ch x 5 min synthetic, and a 34-signal EDF+ converted from
+      a Nihon Kohden recording with mV DC channels). Speed unchanged
+      (macOS, 30 ch x 60 min: write 1.0 s, read 0.5 s). t/29_edf_layout.t
+      checks every sample of the data records against pack / unpack, an
+      annotation signal first with its own samples per record, a short last
+      record, and clipping with its warning.
     - PDL::EEG::ICA and PDL::EEG::Inverse::MinimumNorm: the symmetric
       eigendecompositions (whitening, symmetric orthogonalization, the
       pseudoinverse of the electrode Gram matrix) use PDL::EEG::Linalg
@@ -96,6 +112,8 @@ Revision history for PDL-EEG
       functions (morlet_wavelet, cwt_morlet, tfr_morlet, tfr_superlet,
       tfr_stat, apply_baseline) from the implementation and t/16_tfa.t.
   FIXED
+    - PDL::EEG::GED::detect_blinks returned [0] (one peak at sample 0) when
+      nothing crossed the threshold; it now returns an empty piddle.
     - NihonKohden wfmblock: channel-table off-by-one (electrode code was read
       from the first byte of the next record). Contiguous 10-20 codes were
       unaffected; every aux channel was shifted by one. Labels only, data
