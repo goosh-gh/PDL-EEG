@@ -2,6 +2,18 @@ Revision history for PDL-EEG
 
 0.05  (unreleased)
   CHANGED
+    - PDL::EEG::MAP2D::interpolate_topo keeps, per layout (positions, res,
+      clip, extent, anchors), the matrix from sensor values to grid values,
+      so a new latency on the same layout is one matrix-vector product
+      (agreement with the direct path to rounding, <= 1e-10 relative at
+      every grid point in t/15_map2d.t). At most $TOPO_CACHE_MAX layouts
+      (default 8) are kept; cache => 0 takes the direct path. Measured with
+      19 sensors, direct -> cached (first call on a layout): macOS, Apple
+      M5 Pro, PDL 2.104: res 110 10.4 ms -> 0.12 ms (14 ms), res 220
+      12.6 ms -> 0.45 ms (26 ms); Linux, PDL 2.085: res 110 55 ms ->
+      0.4 ms (69 ms), res 220 132 ms -> 1.2 ms (183 ms).
+      examples/avg_grid_scrub.pl while dragging (macOS): build 13 ms ->
+      2-3 ms per frame, frame interval 32 ms -> 22 ms.
     - PDL::EEG::TFA: faster convolution engine, same coefficients (agreement
       with the previous implementation to rounding, <= 2e-13 relative).
       The signal FFT is computed once and reused for every frequency; all

@@ -162,7 +162,133 @@ sub _tps_solve {
 # in-circle mask; and [-EXT,EXT] extent.  Boundary anchors (inverse-distance
 # on the head rim) keep the extrapolation to the rim tame.
 # ---------------------------------------------------------------------------
+#
+# The field is linear in $vals: F = K x vals, where K (res*res x nsensor) depends
+# only on the layout (positions, res, clip, extent, anchors).  K is built once per
+# layout and kept in a small cache, so a later call with the same layout and new
+# values (another latency) is a single matrix-vector product.  cache => 0 takes
+# the direct path (anchors -> spline solve -> grid on every call).
+# ---------------------------------------------------------------------------
+our $TOPO_CACHE_MAX = 8;    # layouts kept (res 220, 19 sensors: K is about 7 MB)
+my  @TOPO_CACHE;            # [ [key, entry], ... ], most recently used first
+my  $TOPO_BUILDS = 0;       # number of K built (for the tests)
+
+sub _topo_cache_stats { return { builds => $TOPO_BUILDS, entries => scalar @TOPO_CACHE } }
+sub _topo_cache_clear { @TOPO_CACHE = (); $TOPO_BUILDS = 0; return }
+
+sub _topo_geometry {
+    my (%opt) = @_;
+    my $res     = $opt{res}     // 220;
+    my $R       = $opt{clip} // $opt{head_radius} // 0.5;   # colored-region radius
+    my $EXT     = $opt{extent} // ($R + 0.10 > 0.6 ? $R + 0.10 : 0.6);
+    my $nanchor = $opt{anchors} // 16;
+    return ($res, $R, $EXT, $nanchor);
+}
+
 sub interpolate_topo {
+    my ($px, $py, $vals, %opt) = @_;
+    return _interpolate_topo_direct($px, $py, $vals, %opt)
+        if defined $opt{cache} && !$opt{cache};
+
+    my ($res, $R, $EXT, $nanchor) = _topo_geometry(%opt);
+    my $n = $px->nelem;
+    croak "interpolate_topo: px, py and vals must have the same length"
+        unless $py->nelem == $n && $vals->nelem == $n;
+
+    my $key = join '|', pack('d*', $px->list, $py->list), $res, $R, $EXT, $nanchor;
+    my $entry;
+    for my $i (0 .. $#TOPO_CACHE) {
+        next unless $TOPO_CACHE[$i][0] eq $key;
+        my ($hit) = splice @TOPO_CACHE, $i, 1;
+        unshift @TOPO_CACHE, $hit;
+        $entry = $hit->[1];
+        last;
+    }
+    unless ($entry) {
+        $entry = _topo_kernel($px, $py, $res, $R, $EXT, $nanchor);
+        $TOPO_BUILDS++;
+        unshift @TOPO_CACHE, [$key, $entry];
+        splice @TOPO_CACHE, $TOPO_CACHE_MAX if @TOPO_CACHE > $TOPO_CACHE_MAX;
+    }
+
+    my $F = ($entry->{K} x $vals->flat->double->dummy(0))->clump(-1);   # (res*res)
+    return ($F->reshape($res, $res), $entry->{inside}->copy, $EXT, $R);
+}
+
+# K for one layout.  Same steps as _interpolate_topo_direct, with the values
+# replaced by the n x n identity (column i = the field of a unit value at sensor i).
+#   fv = A vals          A = [I; W]  (nf x n), W = rim-anchor IDW weights
+#   c  = inv(L) [fv; 0]  (nf+3)
+#   F  = B c             B = [U, 1, GX, GY]  (res^2 x nf+3)
+#   K  = B inv(L)[:, 0:nf-1] A
+# PDL dims are (columns, rows).
+sub _topo_kernel {
+    my ($px, $py, $res, $R, $EXT, $nanchor) = @_;
+    $px = $px->flat->double; $py = $py->flat->double;
+    my $n = $px->nelem;
+
+    my ($fx, $fy, $A) = ($px, $py, identity($n));         # A: (n, nf)
+    if ($nanchor > 0) {
+        my $ang = sequence($nanchor) / $nanchor * 2 * $PI;
+        my $ax  = $R * cos($ang);
+        my $ay  = $R * sin($ang);
+        my $d2  = ($px->dummy(1, $nanchor) - $ax->dummy(0, $n))**2
+                + ($py->dummy(1, $nanchor) - $ay->dummy(0, $n))**2 + 1e-9;   # (n, nanchor)
+        my $w   = 1 / $d2;
+        my $W   = $w / $w->sumover->dummy(0);                                # rows sum to 1
+        $fx = $px->append($ax);
+        $fy = $py->append($ay);
+        $A  = identity($n)->glue(1, $W);                                     # (n, n+nanchor)
+    }
+    my $nf = $fx->nelem;
+
+    # inv(L) from the same solver as the direct path: _tps_solve(fx, fy, e_j)
+    # is column j of inv(L), so solve once for the nf unit right-hand sides.
+    my $Linv = _tps_inverse($fx, $fy);                                       # (nf+3, nf+3)
+    my $C    = $Linv->slice("0:" . ($nf-1) . ",:") x $A;                     # (n, nf+3)
+
+    my $gl = (sequence($res) / ($res - 1)) * 2 * $EXT - $EXT;
+    my $gx = $gl->dummy(1, $res);
+    my $gy = $gl->dummy(0, $res);
+    my $GX = $gx->flat; my $GY = $gy->flat;
+    my $G  = $GX->nelem;
+
+    # kernel U(r) between grid points and anchors/sensors, as in the direct path
+    my $DX = $GX->dummy(1, $nf) - $fx->dummy(0, $G);
+    my $DY = $GY->dummy(1, $nf) - $fy->dummy(0, $G);
+    my $R2 = $DX*$DX + $DY*$DY;
+    my $U  = 0.5 * $R2 * log($R2 + ($R2 == 0));                              # (G, nf)
+    my $B  = $U->xchg(0, 1)->glue(0, ones(1, $G), $GX->dummy(0), $GY->dummy(0));   # (nf+3, G)
+
+    my $K = $B x $C;                                                         # (n, res*res)
+    my $inside = (sqrt($gx**2 + $gy**2) <= $R);
+    return { K => $K, inside => $inside };
+}
+
+sub _tps_matrix {
+    my ($px, $py, $lambda) = @_;
+    $lambda //= 0;
+    my $n  = $px->nelem;
+    my $dx = $px->dummy(0) - $px->dummy(1);
+    my $dy = $py->dummy(0) - $py->dummy(1);
+    my $r2 = $dx*$dx + $dy*$dy;
+    my $K  = 0.5 * $r2 * log($r2 + ($r2 == 0));
+    $K = $K + $lambda * identity($n) if $lambda;
+    my $L = zeroes($n + 3, $n + 3);
+    $L->slice("0:" . ($n-1) . ",0:" . ($n-1)) .= $K;
+    for my $i (0 .. $n-1) {
+        my ($xi, $yi) = ($px->at($i), $py->at($i));
+        $L->set($n+0, $i, 1);   $L->set($i, $n+0, 1);
+        $L->set($n+1, $i, $xi); $L->set($i, $n+1, $xi);
+        $L->set($n+2, $i, $yi); $L->set($i, $n+2, $yi);
+    }
+    return $L;
+}
+sub _tps_inverse { return inv(_tps_matrix(@_)) }
+
+# The original path: rebuilds the anchors, solves the spline and evaluates the
+# grid on every call.  Kept as the reference for the cached path (t/15_map2d.t).
+sub _interpolate_topo_direct {
     my ($px, $py, $vals, %opt) = @_;
     my $res     = $opt{res}     // 220;
     my $R       = $opt{clip} // $opt{head_radius} // 0.5;   # colored-region radius
@@ -1224,7 +1350,15 @@ C<recenter>, C<periph_deg>.
 
 Scattered sensor values to a dense grid via thin-plate spline; returns
 C<($field, $inside, $extent, $clip_radius)>.  Options: C<res>, C<clip>,
-C<extent>, C<anchors>.
+C<extent>, C<anchors>, C<cache>.
+
+The field is linear in C<$vals>. For each layout (C<$px>, C<$py>, C<res>,
+C<clip>, C<extent>, C<anchors>) the matrix from sensor values to grid values is
+built on the first call and kept; later calls with the same layout and other
+values (another latency) cost one matrix-vector product. Up to
+C<$PDL::EEG::MAP2D::TOPO_CACHE_MAX> layouts (default 8) are kept, the least
+recently used dropped first. C<< cache => 0 >> computes the spline directly on
+every call.
 
 =item grid_layout_1020()
 

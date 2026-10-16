@@ -48,6 +48,80 @@ ok($field->isfinite->all, 'field is finite everywhere');
 ok($inside->sum > 0 && $inside->sum < $field->nelem, 'in-disc mask is a subset');
 ok($rclip > 0.5, 'clip radius extends past the head circle');
 
+# ---- interpolate_topo: cached K against the direct path -------------------------
+{
+    my $rel = sub {     # max |f1 - f2| / max |f1| over every grid point
+        my ($f1, $f2) = @_;
+        return (($f1 - $f2)->abs->max / $f1->abs->max)->sclr;
+    };
+    CORE::srand(29);
+    my @layouts = (['montage 19', $px, $py]);
+    for my $n (5, 12, 32) {
+        push @layouts, ["random $n",
+            pdl(map { 0.8 * CORE::rand() - 0.4 } 1 .. $n),
+            pdl(map { 0.8 * CORE::rand() - 0.4 } 1 .. $n)];
+    }
+    PDL::EEG::MAP2D::_topo_cache_clear();
+    for my $L (@layouts) {
+        my ($name, $lx, $ly) = @$L;
+        my $n = $lx->nelem;
+        for my $o ([res => 23, clip => 0.5], [res => 60, clip => 0.54],
+                   [res => 41, clip => 0.54, anchors => 0], [res => 30, clip => 0.5, extent => 0.7]) {
+            my %o = @$o;
+            my $tag = "$name, " . join(' ', map { "$_=$o{$_}" } sort keys %o);
+            my $vv = pdl(map { 10 * CORE::rand() - 5 } 1 .. $n);
+            my ($f1, $i1, $e1, $r1) = interpolate_topo($lx, $ly, $vv, %o, cache => 0);
+            my ($f2, $i2, $e2, $r2) = interpolate_topo($lx, $ly, $vv, %o);
+            is_deeply([$f2->dims], [$f1->dims], "cached: same dims ($tag)");
+            ok($rel->($f1, $f2) < 1e-10, "cached = direct at every grid point ($tag)");
+            ok(($i1 == $i2)->all, "cached: same in-disc mask ($tag)");
+            is_deeply([$e2, $r2], [$e1, $r1], "cached: same extent and clip ($tag)");
+        }
+    }
+
+    # same layout, new values: K is not rebuilt
+    PDL::EEG::MAP2D::_topo_cache_clear();
+    interpolate_topo($px, $py, $v, res => 40, clip => 0.54);
+    my $v2 = $v->copy; $v2->set($i{Fz}, -4); $v2->set($i{O2}, 2);
+    my ($g2) = interpolate_topo($px, $py, $v2, res => 40, clip => 0.54);
+    my ($d2) = interpolate_topo($px, $py, $v2, res => 40, clip => 0.54, cache => 0);
+    is(PDL::EEG::MAP2D::_topo_cache_stats()->{builds}, 1, 'new values on the same layout: K built once');
+    ok($rel->($d2, $g2) < 1e-10, 'new values on the same layout: still equal to the direct path');
+
+    # another layout, or another resolution: K is built again
+    my $qx = $px->copy; $qx->set($i{Cz}, $qx->at($i{Cz}) + 0.05);
+    my ($g3) = interpolate_topo($qx, $py, $v2, res => 40, clip => 0.54);
+    my ($d3) = interpolate_topo($qx, $py, $v2, res => 40, clip => 0.54, cache => 0);
+    is(PDL::EEG::MAP2D::_topo_cache_stats()->{builds}, 2, 'moved sensor: K built again');
+    ok($rel->($d3, $g3) < 1e-10, 'moved sensor: equal to the direct path');
+    interpolate_topo($px, $py, $v2, res => 41, clip => 0.54);
+    is(PDL::EEG::MAP2D::_topo_cache_stats()->{builds}, 3, 'other resolution: K built again');
+
+    # negative control: the K of the first layout does not fit the moved one
+    my $Kold = PDL::EEG::MAP2D::_topo_kernel($px, $py, 40, 0.54, 0.64, 16)->{K};
+    my $wrong = ($Kold x $v2->dummy(0))->clump(-1)->reshape(40, 40);
+    ok($rel->($d3, $wrong) > 1e-3, 'negative control: a stale K gives a different field');
+
+    # the returned mask is the caller's own copy
+    my (undef, $m1) = interpolate_topo($px, $py, $v, res => 40, clip => 0.54);
+    $m1 .= 0;
+    my (undef, $m2) = interpolate_topo($px, $py, $v, res => 40, clip => 0.54);
+    ok($m2->sum->sclr > 0, 'changing the returned mask does not change the cached one');
+
+    # the number of layouts kept is bounded
+    PDL::EEG::MAP2D::_topo_cache_clear();
+    {
+        local $PDL::EEG::MAP2D::TOPO_CACHE_MAX = 3;
+        interpolate_topo($px, $py, $v, res => $_, clip => 0.54) for 20 .. 25;
+        is(PDL::EEG::MAP2D::_topo_cache_stats()->{entries}, 3, 'cache keeps at most TOPO_CACHE_MAX layouts');
+        interpolate_topo($px, $py, $v, res => 25, clip => 0.54);
+        is(PDL::EEG::MAP2D::_topo_cache_stats()->{builds}, 6, 'the most recent layout is still cached');
+        interpolate_topo($px, $py, $v, res => 20, clip => 0.54);
+        is(PDL::EEG::MAP2D::_topo_cache_stats()->{builds}, 7, 'the oldest layout was dropped');
+    }
+    PDL::EEG::MAP2D::_topo_cache_clear();
+}
+
 # ---- grid_layout_1020 -----------------------------------------------------------
 {
     my $g = PDL::EEG::MAP2D::grid_layout_1020();
