@@ -9,7 +9,9 @@ use PDL::EEG::Filter          qw(zp_butter analytic_signal);
 use PDL::EEG::Heartbeat       qw(beat_epochs);
 use Exporter 'import';
 
-our @EXPORT_OK = qw(rr_series r_amplitude resp_phase phase_at phase_locking);
+our @EXPORT_OK = qw(rr_series r_amplitude resp_phase phase_at phase_locking
+                    phase_template phase_template_multi phase_agreement
+                    fourier_fit fourier_eval wrap_phase unwrap_phase circ_sd);
 our %EXPORT_TAGS = (all => \@EXPORT_OK);
 
 my $PI = 3.14159265358979323846;
@@ -146,6 +148,246 @@ sub phase_locking {
     return (sqrt($c * $c + $s * $s)->sclr, atan2($s, $c)->sclr);
 }
 
+# ===========================================================================
+# Respiratory phase re-estimated against the shape of one breath
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# $w = wrap_phase($x)      angle(s) to -pi .. pi (pi itself goes to -pi)
+# $u = unwrap_phase($p)    phases of successive beats made continuous
+# $s = circ_sd($d)         circular SD [rad] of the angles $d:
+#                          sqrt(-2 ln R), R = length of the mean of exp(i d)
+# ---------------------------------------------------------------------------
+sub wrap_phase {
+    my $x = shift;
+    return $x - 2 * $PI * (($x + $PI) / (2 * $PI))->floor;
+}
+
+sub unwrap_phase {
+    my $p = shift;
+    return $p->copy if $p->nelem < 2;
+    my $d = wrap_phase($p->slice('1:-1') - $p->slice('0:-2'));
+    return append($p->slice('0:0'), $p->at(0) + $d->cumusumover);
+}
+
+sub circ_sd {
+    my $d = shift;
+    my $R = sqrt(cos($d)->avg ** 2 + sin($d)->avg ** 2);
+    $R = 1 if $R > 1;                                   # rounding may put R just above 1
+    return sqrt(-2 * log($R));
+}
+
+# ---------------------------------------------------------------------------
+# $c = fourier_fit($phi, $y, $K)
+#
+#   $phi : (n) phase of each beat [rad]
+#   $y   : (n) or (n, nf) one or several per-beat series
+#   $c   : (2K+1, nf) least-squares coefficients of
+#          y = c0 + sum_k (c_{2k-1} cos k phi + c_{2k} sin k phi), k = 1 .. K
+#
+# $f = fourier_eval($c, $phi)   (n, nf) the series of $c at the phases $phi
+# ---------------------------------------------------------------------------
+sub _fourier_basis {
+    my ($phi, $K) = @_;
+    my @col = (ones($phi->nelem));
+    push @col, cos($_ * $phi), sin($_ * $phi) for 1 .. $K;
+    return cat(@col)->transpose;                        # (2K+1, n) as a matrix: n rows
+}
+
+sub fourier_fit {
+    my ($phi, $y, $K) = @_;
+    croak "fourier_fit: K must be >= 1" unless $K && $K >= 1;
+    croak "fourier_fit: phi and y must have the same number of beats" unless $phi->nelem == $y->dim(0);
+    my $X = _fourier_basis($phi, $K);
+    my $Y = $y->ndims == 1 ? $y->dummy(1) : $y;
+    my $c = inv($X->transpose x $X) x ($X->transpose x $Y->transpose);
+    return $c->transpose;
+}
+
+sub fourier_eval {
+    my ($c, $phi) = @_;
+    my $K = ($c->dim(0) - 1) / 2;
+    return (_fourier_basis($phi, $K) x $c->transpose)->transpose;
+}
+
+# For each beat, the index range of the beats within +-$half s (times ascending), found by two pointers.
+# The same sets as which(abs($tb - $tb->at($k)) <= $half), without a whole-length temporary per beat: with
+# PDL 2.085 such temporaries made a loop over 30000 beats grow to several GB.
+sub _bounds {
+    my ($tb, $half) = @_;
+    my @t = $tb->list;
+    my (@lo, @hi);
+    my ($l, $h) = (0, 0);
+    for my $k (0 .. $#t) {
+        $l++ while $t[$l] < $t[$k] - $half;
+        $h = $k if $h < $k;
+        $h++ while $h + 1 <= $#t && $t[$h + 1] <= $t[$k] + $half;
+        push @lo, $l;
+        push @hi, $h;
+    }
+    return (\@lo, \@hi);
+}
+
+sub _win { my ($lo, $hi, $k) = @_; return sequence(long, $hi->[$k] - $lo->[$k] + 1) + $lo->[$k] }
+
+# local rate [rad/s]: slope of the unwrapped starting phase over the window
+sub _local_rate {
+    my ($tt, $pp) = @_;
+    return 0 if $tt->nelem < 2;
+    my $tc = $tt - $tt->avg;
+    return sum($tc * ($pp - $pp->avg)) / sum($tc ** 2);
+}
+
+# grid minimum refined by a parabola through it and its two neighbours (the grid is circular)
+sub _grid_min {
+    my ($ss, $grid) = @_;
+    my $ng = $ss->nelem;
+    my $i  = $ss->minimum_ind->sclr;
+    my ($s0, $s1, $s2) = map { $ss->at(($i + $_) % $ng) } -1, 0, 1;
+    my $den = $s0 - 2 * $s1 + $s2;
+    my $dx  = $den > 0 ? 0.5 * ($s0 - $s2) / $den : 0;
+    return $grid->at($i) + $dx * 2 * $PI / $ng;
+}
+
+# One pass of the local fit, one or several features.  $Y (n, nf), templates $C (2K+1, nf), weights $wt (nf).
+sub _phase_local {
+    my ($tb, $Y, $phi_init, $C, $wt, $win, $ng) = @_;
+    my ($n, $nf) = $Y->dims;
+    my $K  = ($C->dim(0) - 1) / 2;
+    my $Cc = $C->copy;
+    $Cc->slice('(0),:') .= 0;                           # the template's mean is not part of the shape
+    my $pu   = unwrap_phase($phi_init);
+    my $grid = sequence($ng) / $ng * 2 * $PI - $PI;
+    my $out  = zeroes($n);
+    my ($blo, $bhi) = _bounds($tb, $win / 2);
+    for my $k (0 .. $n - 1) {
+        my $wi = _win($blo, $bhi, $k);
+        my $tt = $tb->index($wi) - $tb->at($k);
+        my $m  = $wi->nelem;
+        my $om = _local_rate($tt, $pu->index($wi));
+        my $P  = ($grid->dummy(0) + $om * $tt->dummy(1))->flat;      # m*ng trial phases, beats fastest
+        my $S  = (_fourier_basis($P, $K) x $Cc->transpose)->transpose; # (m*ng, nf) template values
+        my $tot = zeroes($ng);
+        for my $f (0 .. $nf - 1) {
+            my $Sf = $S->slice(":,($f)")->copy->reshape($m, $ng);
+            my $Sc = $Sf - $Sf->average->dummy(0);
+            my $yc = $Y->slice(":,($f)")->index($wi);
+            $yc = $yc - $yc->avg;
+            my $gain = (($Sc * $yc->dummy(1))->sumover / (($Sc ** 2)->sumover + 1e-12))->clip(0, undef);
+            $tot += $wt->at($f) * (($yc->dummy(1) - $gain->dummy(0) * $Sc) ** 2)->sumover;
+        }
+        $out->set($k, _grid_min($tot, $grid));
+    }
+    return wrap_phase($out);
+}
+
+# ---------------------------------------------------------------------------
+# $res = phase_template($tb, $y, $phi0, %opt)
+#
+#   $tb   : (n) beat times [s], ascending
+#   $y    : (n) per-beat series (e.g. R amplitude minus its slow mean)
+#   $phi0 : (n) starting phase at the beats [rad] (e.g. phase_at of resp_phase)
+#
+#   win   => 5     window [s] around each beat
+#   K     => 2     harmonics of the template
+#   iter  => 3     rounds
+#   ngrid => 120   phase grid of the search
+#
+# Each round: the template (the shape of one breath) is the Fourier fit of $y on
+# the current phase; then, for every beat, the beats within +-win/2 s are fitted
+# by y_j = a + g s(phi_c + w (t_j - t_k)) with the template s, the local rate w
+# from the current phase, a free offset a and gain g >= 0; phi_c is the new phase
+# of the beat.  Returns { phi => (n) phase [rad], c => (2K+1, 1) template }.
+# ---------------------------------------------------------------------------
+sub phase_template {
+    my ($tb, $y, $phi0, %o) = @_;
+    croak "phase_template: tb, y and phi0 must be 1-D of equal length"
+        unless $tb->ndims == 1 && $y->ndims == 1 && $tb->nelem == $y->nelem && $phi0->nelem == $y->nelem;
+    my $K = $o{K} // 2;
+    my $phi = $phi0;
+    my $c;
+    for (1 .. ($o{iter} // 3)) {
+        $c   = fourier_fit($phi, $y, $K);
+        $phi = _phase_local($tb, $y->dummy(1), $phi, $c, ones(1), $o{win} // 5, $o{ngrid} // 120);
+    }
+    return { phi => $phi, c => fourier_fit($phi, $y, $K) };
+}
+
+# ---------------------------------------------------------------------------
+# $res = phase_template_multi($tb, $Y, $phi0, %opt)
+#
+#   $Y : (n, nf) several per-beat series that share one phase
+#
+#   gate => 0.1   a series is used only if the fundamental on $phi0 explains at
+#                 least this share of its variance
+#   win, K, iter, ngrid as phase_template
+#
+# As phase_template, with one template per series, a free offset and gain >= 0
+# per window and series, and the series weighted by 1 / their residual variance.
+# Returns { phi, C (2K+1, nused), used (indices into the columns of $Y),
+#           w (nused) weights, r2 (nf) share of variance on $phi0 }.
+# ---------------------------------------------------------------------------
+sub phase_template_multi {
+    my ($tb, $Y, $phi0, %o) = @_;
+    croak "phase_template_multi: Y must be (n, nf)" unless $Y->ndims == 2 && $Y->dim(0) == $tb->nelem && $phi0->nelem == $tb->nelem;
+    my $K = $o{K} // 2;
+    my ($n, $nf) = $Y->dims;
+    my $r2 = pdl(map {
+        my $y = $Y->slice(":,($_)");
+        my $f = fourier_eval(fourier_fit($phi0, $y, 1), $phi0)->flat;
+        (sum(($f - $y->avg) ** 2) / sum(($y - $y->avg) ** 2))->sclr
+    } 0 .. $nf - 1);
+    my $used = which($r2 >= ($o{gate} // 0.1));
+    $used = pdl(long, [0]) if $used->isempty;
+    my $Yu  = $Y->dice_axis(1, $used);
+    my $phi = $phi0;
+    my ($C, $wt);
+    for (1 .. ($o{iter} // 3)) {
+        $C = fourier_fit($phi, $Yu, $K);
+        my $res = $Yu - fourier_eval($C, $phi);
+        $wt  = 1 / (($res ** 2)->sumover / ($n - 2 * $K - 1));
+        $phi = _phase_local($tb, $Yu, $phi, $C, $wt, $o{win} // 5, $o{ngrid} // 120);
+    }
+    return { phi => $phi, C => fourier_fit($phi, $Yu, $K), used => $used, w => $wt, r2 => $r2 };
+}
+
+# ---------------------------------------------------------------------------
+# $q = phase_agreement($tb, $p, $q2, %opt)
+#
+#   $tb     : (n) beat times [s], ascending
+#   $p, $q2 : (n) two estimates of the phase at the beats [rad]
+#
+#   win => 120   window [s] centred on each beat (shorter at the ends)
+#   min => 40    fewest beats in a window; below it the value is NaN
+#
+# Circular SD [rad] of p - q2 over the beats within +-win/2 s of each beat.  A
+# constant difference does not count.  With p the phase of resp_phase and q2 that
+# of phase_template on the same series, this is the quality index q_agree.
+# ---------------------------------------------------------------------------
+sub phase_agreement {
+    my ($tb, $p, $q2, %o) = @_;
+    croak "phase_agreement: tb, p and q2 must have the same number of beats" unless $tb->nelem == $p->nelem && $p->nelem == $q2->nelem;
+    my $half = ($o{win} // 120) / 2;
+    my $min  = $o{min} // 40;
+    my $d = wrap_phase($p->double - $q2->double);
+    my @c = cos($d)->list;
+    my @s = sin($d)->list;
+    my @t = $tb->list;
+    my $n = @t;
+    my ($lo, $hi, $sc, $ss) = (0, -1, 0, 0);
+    my @out;
+    for my $k (0 .. $n - 1) {
+        while ($hi + 1 < $n && $t[$hi + 1] < $t[$k] + $half) { $hi++; $sc += $c[$hi]; $ss += $s[$hi] }
+        while ($t[$lo] < $t[$k] - $half) { $sc -= $c[$lo]; $ss -= $s[$lo]; $lo++ }
+        my $m = $hi - $lo + 1;
+        if ($m < $min) { push @out, 9**9**9 / 9**9**9; next }      # NaN
+        my $R = sqrt($sc ** 2 + $ss ** 2) / $m;
+        $R = 1 if $R > 1;
+        push @out, sqrt(-2 * log($R));
+    }
+    return pdl(double, \@out);
+}
+
 sub _rnd { my $v = shift; $v >= 0 ? int($v + 0.5) : -int(-$v + 0.5) }
 
 1;
@@ -225,6 +467,49 @@ C<($plv, $diff)> of two phase series: the length (0..1) and the angle of the
 mean of C<exp(i(p - q))>. Two series derived from different quantities of the
 same recording (RR interval, R amplitude) that follow the same breathing give
 a C<$plv> near 1.
+
+=item phase_template($tb, $y, $phi0, win => 5, K => 2, iter => 3, ngrid => 120)
+
+Re-estimates the phase at the beats against the shape of one breath. Each
+round, the template is the Fourier series (C<K> harmonics) of C<$y> fitted on
+the current phase; then for every beat the beats within C<+-win/2> s are fitted
+by the template at phases C<phi_c + w (t_j - t_k)>, with the local rate C<w>
+from the current phase and a free offset and gain (gain E<gt>= 0) per window;
+C<phi_c> (grid search, refined by a parabola) is the new phase of the beat.
+The beat samples are used as they are, so a harmonic of the breath above half
+the beat rate does not fold into the phase, as it does in C<resp_phase>.
+C<$phi0> is the starting phase, usually C<phase_at> of C<resp_phase> on the
+same series. Returns C<{ phi =E<gt> (n) phase [rad], c =E<gt> (2K+1, 1) template }>.
+The phase origin is that of C<$phi0>.
+
+=item phase_template_multi($tb, $Y, $phi0, gate => 0.1, win, K, iter, ngrid)
+
+As C<phase_template> for several per-beat series C<$Y> C<(n, nf)> that share
+one phase: one template, offset and gain per series, the series weighted by
+1 / their residual variance. A series is used only if its fundamental on
+C<$phi0> explains at least C<gate> of its variance. Returns
+C<{ phi, C, used, w, r2 }>.
+
+=item phase_agreement($tb, $p, $q, win => 120, min => 40)
+
+At each beat, the circular SD [rad] of C<$p - $q> over the beats within
+C<+-win/2> s (fewer at the ends of the series; NaN where fewer than C<min>).
+A constant difference does not count. With C<$p> from C<resp_phase> and C<$q>
+from C<phase_template> on the same series, this is an index of how reliable
+the phase is in that stretch: the two estimates rest on different
+assumptions (a sinusoid in the band; a repeating shape) and differ where the
+series is not dominated by regular breathing.
+
+=item fourier_fit($phi, $y, $K), fourier_eval($c, $phi)
+
+Least-squares coefficients C<(2K+1, nf)> of
+C<y = c0 + sum_k (c_(2k-1) cos k phi + c_(2k) sin k phi)> for each column of
+C<$y> C<(n)> or C<(n, nf)>, and the series of given coefficients at C<$phi>.
+
+=item wrap_phase($x), unwrap_phase($p), circ_sd($d)
+
+Angle to C<-pi .. pi>; phases of successive beats made continuous; circular
+SD C<sqrt(-2 ln R)> of angles, C<R> the length of the mean of C<exp(i d)>.
 
 =back
 

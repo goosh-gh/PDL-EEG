@@ -71,6 +71,22 @@ Revision history for PDL-EEG
       time-domain convolution, trials together vs one at a time, block
       size independence.
   ADDED
+    - PDL::EEG::Heartbeat::Respiration: phase_template and
+      phase_template_multi (phase at the beats re-estimated against a
+      Fourier template of one breath, by a local grid search on the beat
+      samples), phase_agreement (circular SD of the difference of two phase
+      estimates in a window centred on each beat), fourier_fit,
+      fourier_eval, wrap_phase, unwrap_phase, circ_sd. t/31_resp_template.t.
+    - PDL::EEG::Heartbeat::BeatFeatures: beat_features, per-beat size,
+      shift and stretch of QRS and T, R amplitude relative to its running
+      mean and RR intervals for one ECG lead at any rate.
+      t/32_beat_features.t.
+    - PDL::EEG::IO::WFDB: read_wfdb (format-16 records in .dat or Matlab
+      v4 .mat), read_wfdb_annotations (MIT format, signed SKIP),
+      wfdb_stages_events. t/33_wfdb.t, xt/71_wfdb_real.t.
+    - examples/heartbeat_resp_phase.pl, heartbeat_resp_vs_belt.pl,
+      heartbeat_resp_vs_belt_stage.pl, heartbeat_resp_quality_vs_belt.pl,
+      heartbeat_resp_quality_pool.pl, heartbeat_sim_bn_resp.pl.
     - PDL::EEG::SynthNoise: synth_noise (white or AR(1), Gaussian or
       uniform innovations, one or several independent channels, each
       zero-mean with an exact SD), seed_rng (PDL srandom / srand by PDL
