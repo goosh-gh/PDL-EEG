@@ -220,6 +220,9 @@ $drv->show_grid_scrub(
     grid_render => $grid_render,
     cell_render => $cell_render,
     main_scrub  => 1,
+    # everything but the scalp map (a _scrub_skip panel) is the same for every
+    # latency: draw it once and keep it (redrawn only when the window size changes)
+    static_key  => sub { '' },
     zoom_size   => [760, 560],
     vline       => { color => [0.78, 0.16, 0.16], lw => 1.2 },
     marker      => { color => [0.78, 0.16, 0.16], ms => 8, marker => 'o' },
