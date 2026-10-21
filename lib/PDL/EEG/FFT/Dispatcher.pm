@@ -13,7 +13,8 @@ our %EXPORT_TAGS = (all => \@EXPORT_OK);
 # croak reports the line of the caller of these modules, not a line inside them
 our @CARP_NOT = qw(PDL::EEG::Filter PDL::EEG::TFA PDL::EEG::Heartbeat::Respiration);
 
-# 'auto'  : PDL::FFT when it can transform the length, PDL::FFTW3 otherwise
+# 'auto'  : PDL::FFTW3 when it is installed; otherwise PDL::FFT for the lengths
+#           it transforms correctly, and a croak for the others
 # 'pdl'   : PDL::FFT only; a length it cannot transform croaks
 # 'fftw3' : PDL::FFTW3 for every length
 our $BACKEND = 'auto';
@@ -92,8 +93,8 @@ sub fft_backend {
         croak "PDL::EEG::FFT::Dispatcher: \$BACKEND is 'fftw3' but PDL::FFTW3 is not installed" unless _fftw3();
         return 'PDL::FFTW3';
     }
-    return 'PDL::FFT' if fft_ok($n);
     return 'PDL::FFTW3' if $BACKEND eq 'auto' && _fftw3();
+    return 'PDL::FFT' if fft_ok($n);
     croak sprintf "PDL::EEG::FFT::Dispatcher: PDL::FFT cannot transform length %d (it splits it into %d factors, "
         . "its limit is %d) and PDL::FFTW3 is %s", $n, $NF{$n}, $NFACTOR,
         $BACKEND eq 'pdl' ? "switched off (\$PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl')" : "not installed";
@@ -130,7 +131,7 @@ __END__
 
 =head1 NAME
 
-PDL::EEG::FFT::Dispatcher - picks the FFT library for each length: PDL::FFT where it works, PDL::FFTW3 where it does not
+PDL::EEG::FFT::Dispatcher - picks the FFT library: PDL::FFTW3 when installed, otherwise PDL::FFT for the lengths it transforms correctly
 
 =head1 SYNOPSIS
 
@@ -174,10 +175,11 @@ Complex FFT along dim 0, in place, broadcasting over the other dims, with the
 conventions of C<PDL::FFT::fft> and C<ifft>: forward unscaled, inverse scaled
 by 1/n. C<$re> and C<$im> must have the same dims.
 
-The transform uses PDL::FFT when C<fft_ok> holds for the length, and
-L<PDL::FFTW3> otherwise. When neither can transform the length, the call
-croaks with a message that names the length; it does not return a wrong
-result.
+The transform uses L<PDL::FFTW3> when it is installed. Without it, it uses
+PDL::FFT when C<fft_ok> holds for the length, and otherwise croaks with a
+message that names the length; it does not return a wrong result. The two
+libraries agree to rounding error (about 1e-15 relative); PDL::FFTW3 is
+faster on long records.
 
 =item fft_backend($n)
 
@@ -188,7 +190,8 @@ croaks as C<fft_inplace> does.
 
 =head2 $PDL::EEG::FFT::Dispatcher::BACKEND
 
-C<'auto'> (default) as above; C<'pdl'> never uses PDL::FFTW3; C<'fftw3'> uses
-PDL::FFTW3 for every length and croaks when it is not installed.
+C<'auto'> (default) as above; C<'pdl'> never uses PDL::FFTW3 (PDL::FFT for
+the lengths C<fft_ok> accepts, a croak for the others); C<'fftw3'> uses
+PDL::FFTW3 and croaks when it is not installed.
 
 =cut

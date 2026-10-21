@@ -64,6 +64,32 @@ subtest 'fft_inplace against a direct DFT' => sub {
     }
 };
 
+# 'auto' prefers PDL::FFTW3 for every length when it is installed; without it,
+# PDL::FFT for the lengths it transforms, a croak for the others. The case
+# without PDL::FFTW3 runs in a child perl where loading PDL::FFTW3 fails.
+subtest "BACKEND 'auto': which library" => sub {
+    my $child = sub {
+        my ($code) = @_;
+        my $hide = 'BEGIN { unshift @INC, sub { die "hidden\n" if $_[1] eq "PDL/FFTW3.pm"; return } }';
+        my @inc = map { "-I$_" } grep { !ref } @INC;
+        open my $fh, '-|', $^X, @inc, '-e', "$hide use PDL; use PDL::EEG::FFT::Dispatcher qw(fft_backend); $code"
+            or die "child: $!";
+        local $/;
+        my $out = <$fh>;
+        close $fh;
+        return $out;
+    };
+    is($child->('print fft_backend(1000), " ", (eval { fft_backend(' . $BAD . ') } // "croak"), "\n"'),
+       "PDL::FFT croak\n", "without PDL::FFTW3: PDL::FFT for 1000, croak for $BAD");
+    SKIP: {
+        skip 'PDL::FFTW3 not installed', 2 unless $HAVE_FFTW3;
+        local $PDL::EEG::FFT::Dispatcher::BACKEND = 'auto';
+        is(fft_backend(1000), 'PDL::FFTW3', 'with PDL::FFTW3: PDL::FFTW3 for 1000 too');
+        local $PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl';
+        is(fft_backend(1000), 'PDL::FFT', "BACKEND 'pdl': PDL::FFT for 1000");
+    }
+};
+
 subtest "length $BAD" => sub {
     {
         local $PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl';

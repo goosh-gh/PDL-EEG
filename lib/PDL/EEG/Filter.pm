@@ -89,10 +89,11 @@ sub zp_butter {
 # correctly; nothing is added when nt is such a length already.
 #
 #   exact => 1    no zeros: one FFT of length nt, the record taken as one
-#                 period. This is scipy.signal.hilbert. PDL::FFT needs time
-#                 proportional to nt^2 when nt has a large prime factor. When
-#                 PDL::FFT cannot transform length nt, PDL::FFTW3 is used, and
-#                 without it the call croaks (PDL::EEG::FFT::Dispatcher).
+#                 period. This is scipy.signal.hilbert. The transform is
+#                 PDL::FFTW3 when it is installed; without it PDL::FFT, which
+#                 needs time proportional to nt^2 when nt has a large prime
+#                 factor and croaks for a length it cannot transform
+#                 (PDL::EEG::FFT::Dispatcher).
 # ---------------------------------------------------------------------------
 sub analytic_signal {
     my ($x, %o) = @_;
@@ -219,9 +220,9 @@ Returns C<($re, $im)>: C<$re> is C<$x> and C<$im> its Hilbert transform.
 The channel mean is removed before the transform and the record is followed by
 zeros up to C<fft_len(nt)> (see above); when C<nt> is such a length nothing
 is added. C<< exact => 1 >> transforms the record at its own length, as one
-period of a periodic signal; this is C<scipy.signal.hilbert>, and with
-PDL::FFT it takes long when C<nt> has a large prime factor. For a length
-PDL::FFT cannot transform, PDL::FFTW3 is used; without it the call croaks.
+period of a periodic signal; this is C<scipy.signal.hilbert>. The transform
+is PDL::FFTW3 when it is installed; without it PDL::FFT, which takes long when
+C<nt> has a large prime factor and croaks for a length it cannot transform.
 
 The Hilbert transform is not local. The values near both ends of the record
 depend on what follows the record (zeros, or the record again), in either
