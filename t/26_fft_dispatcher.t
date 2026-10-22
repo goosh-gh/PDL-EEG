@@ -10,6 +10,7 @@ use PDL::EEG::Heartbeat::Respiration qw(resp_phase);
 
 my $PI = 3.14159265358979323846;
 my $HAVE_FFTW3 = eval { require PDL::FFTW3; 1 } ? 1 : 0;
+my $HAVE_FD    = eval { require PDL::FFTDispatcher; 1 } ? 1 : 0;
 my $BAD = 157464;                 # 2^3 3^9: 12 factors in PDL::FFT
 
 sub is235 { my $r = shift; for my $p (2, 3, 5) { $r /= $p while $r % $p == 0 } $r == 1 }
@@ -49,7 +50,7 @@ subtest 'factor count and lengths' => sub {
 };
 
 subtest 'fft_inplace against a direct DFT' => sub {
-    my @backends = ('auto', ($HAVE_FFTW3 ? 'fftw3' : ()));
+    my @backends = ('auto', 'pdl', ($HAVE_FD ? 'pocketfft' : ()), ($HAVE_FFTW3 ? 'fftw3' : ()));
     for my $be (@backends) {
         local $PDL::EEG::FFT::Dispatcher::BACKEND = $be;
         for my $n (12, 7) {
@@ -64,13 +65,16 @@ subtest 'fft_inplace against a direct DFT' => sub {
     }
 };
 
-# 'auto' prefers PDL::FFTW3 for every length when it is installed; without it,
-# PDL::FFT for the lengths it transforms, a croak for the others. The case
-# without PDL::FFTW3 runs in a child perl where loading PDL::FFTW3 fails.
+# 'auto': PDL::FFTDispatcher (PDL::PocketFFT) when it is installed, otherwise
+# PDL::FFTW3 when it is installed, otherwise PDL::FFT for the lengths it
+# transforms and a croak for the others. Each case runs in a child perl in
+# which loading the modules left out fails.
 subtest "BACKEND 'auto': which library" => sub {
     my $child = sub {
-        my ($code) = @_;
-        my $hide = 'BEGIN { unshift @INC, sub { die "hidden\n" if $_[1] eq "PDL/FFTW3.pm"; return } }';
+        my ($code, @hidden) = @_;
+        my $list = join ' ', map { "$_.pm" } map { (my $f = $_) =~ s{::}{/}g; $f } @hidden;
+        my $hide = "BEGIN { my %h = map { \$_ => 1 } qw($list); "
+                 . 'unshift @INC, sub { die "hidden\n" if $h{$_[1]}; return } }';
         my @inc = map { "-I$_" } grep { !ref } @INC;
         open my $fh, '-|', $^X, @inc, '-e', "$hide use PDL; use PDL::EEG::FFT::Dispatcher qw(fft_backend); $code"
             or die "child: $!";
@@ -79,15 +83,27 @@ subtest "BACKEND 'auto': which library" => sub {
         close $fh;
         return $out;
     };
-    is($child->('print fft_backend(1000), " ", (eval { fft_backend(' . $BAD . ') } // "croak"), "\n"'),
-       "PDL::FFT croak\n", "without PDL::FFTW3: PDL::FFT for 1000, croak for $BAD");
-    SKIP: {
-        skip 'PDL::FFTW3 not installed', 2 unless $HAVE_FFTW3;
-        local $PDL::EEG::FFT::Dispatcher::BACKEND = 'auto';
-        is(fft_backend(1000), 'PDL::FFTW3', 'with PDL::FFTW3: PDL::FFTW3 for 1000 too');
-        local $PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl';
-        is(fft_backend(1000), 'PDL::FFT', "BACKEND 'pdl': PDL::FFT for 1000");
+    my $which = 'print fft_backend(1000), " ", (eval { fft_backend(' . $BAD . ') } // "croak"), "\n"';
+    is($child->($which, 'PDL::FFTDispatcher', 'PDL::FFTW3'), "PDL::FFT croak\n",
+       "without PDL::FFTDispatcher and PDL::FFTW3: PDL::FFT for 1000, croak for $BAD");
+    is($child->('$PDL::EEG::FFT::Dispatcher::BACKEND = "pocketfft"; print eval { fft_backend(1000) } // "croak", "\n"',
+                'PDL::FFTDispatcher'), "croak\n", "BACKEND 'pocketfft' without PDL::FFTDispatcher croaks");
+    {
+        local $PDL::EEG::FFT::Dispatcher::BACKEND = 'pocket';
+        ok(!eval { fft_backend(1000); 1 }, "'pocket' is not a backend name (it is 'pocketfft')");
     }
+    SKIP: {
+        skip 'PDL::FFTW3 not installed', 1 unless $HAVE_FFTW3;
+        is($child->($which, 'PDL::FFTDispatcher'), "PDL::FFTW3 PDL::FFTW3\n",
+           "with PDL::FFTW3 only: PDL::FFTW3 for every length");
+    }
+    SKIP: {
+        skip 'PDL::FFTDispatcher not installed', 1 unless $HAVE_FD;
+        is($child->($which, 'PDL::FFTW3'), "PDL::PocketFFT PDL::PocketFFT\n",
+           "with PDL::FFTDispatcher: PDL::PocketFFT for every length");
+    }
+    local $PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl';
+    is(fft_backend(1000), 'PDL::FFT', "BACKEND 'pdl': PDL::FFT for 1000");
 };
 
 subtest "length $BAD" => sub {
@@ -98,8 +114,8 @@ subtest "length $BAD" => sub {
         like($@, qr/cannot transform length $BAD/, "BACKEND 'pdl': croaks instead of calling PDL::FFT");
     }
     SKIP: {
-        skip 'PDL::FFTW3 not installed', 3 unless $HAVE_FFTW3;
-        is(fft_backend($BAD), 'PDL::FFTW3', 'auto: PDL::FFTW3');
+        skip 'neither PDL::FFTDispatcher nor PDL::FFTW3 installed', 3 unless $HAVE_FD || $HAVE_FFTW3;
+        is(fft_backend($BAD), $HAVE_FD ? 'PDL::PocketFFT' : 'PDL::FFTW3', "auto: " . fft_backend($BAD));
         my $x = sin(sequence(double, $BAD) * 0.37);
         my ($re, $im) = ($x->copy, zeroes(double, $BAD));
         fft_inplace($re, $im);
@@ -168,7 +184,7 @@ subtest "exact lengths: analytic_signal(exact => 1), resp_phase" => sub {
         like($@, qr/cannot transform length $BAD/, "resp_phase: croaks with BACKEND 'pdl'");
     }
     SKIP: {
-        skip 'PDL::FFTW3 not installed', 2 unless $HAVE_FFTW3;
+        skip 'neither PDL::FFTDispatcher nor PDL::FFTW3 installed', 2 unless $HAVE_FD || $HAVE_FFTW3;
         my ($re, $im) = analytic_signal($x, exact => 1);
         ok(max(abs(sqrt($re * $re + $im * $im) - 1)) < 1e-9, 'analytic_signal(exact): envelope 1');
         my $ph = resp_phase($t, $y, fs => 4);

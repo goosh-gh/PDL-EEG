@@ -20,6 +20,11 @@ WriteMakefile(
     test => { TESTS => 't/*.t' },
     META_MERGE => {
         'meta-spec' => { version => 2 },
+        # optional FFT libraries, chosen by PDL::EEG::FFT::Dispatcher
+        prereqs => { runtime => { recommends => {
+            'PDL::FFTDispatcher' => '0.001',
+            'PDL::FFTW3'         => '0.20',
+        } } },
         resources => {
             repository => {
                 type => 'git',

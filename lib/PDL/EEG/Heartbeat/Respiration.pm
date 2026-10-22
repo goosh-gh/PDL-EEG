@@ -453,8 +453,9 @@ largest spectral line of the resampled series inside the band, and
 C<band_frac>, the share of the resampled series' power inside the band.
 
 The spectrum for C<peak_hz> and C<band_frac> is taken at the length of the
-grid, with PDL::FFTW3 when it is installed; without it, PDL::FFT, which
-croaks for a length it cannot transform (L<PDL::EEG::FFT::Dispatcher>).
+grid, with the library L<PDL::EEG::FFT::Dispatcher> chooses: PDL::PocketFFT
+(through PDL::FFTDispatcher) or PDL::FFTW3 when installed, otherwise PDL::FFT,
+which croaks for a length it cannot transform.
 
 =item phase_at($ph, $times)
 
