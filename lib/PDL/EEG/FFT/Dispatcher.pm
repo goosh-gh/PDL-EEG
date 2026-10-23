@@ -95,6 +95,18 @@ sub fft_len {
     }
 }
 
+# _fd_choice(): the library PDL::FFTDispatcher picks for double data under its
+# own $BACKEND. Asked for length 1, so its 'pdl' backend does not check the
+# length; fft_backend checks it with fft_ok. A croak of PDL::FFTDispatcher (an
+# unknown name in PDL_FFTDISPATCHER_BACKEND, 'fftw3' without PDL::FFTW3) is
+# passed on from here.
+sub _fd_choice {
+    my $b = eval { PDL::FFTDispatcher::fft_backend([1]) };
+    return $b if defined $b;
+    (my $msg = $@) =~ s/ at \S+ line \d+\.?\n?\z//;
+    croak "PDL::EEG::FFT::Dispatcher: $msg";
+}
+
 # fft_backend($n): 'PDL::PocketFFT', 'PDL::FFTW3' or 'PDL::FFT', the library
 # that transforms length $n under $BACKEND; croaks when none can
 sub fft_backend {
@@ -111,14 +123,22 @@ sub fft_backend {
         return 'PDL::FFTW3';
     }
     if ($BACKEND eq 'auto') {
-        return 'PDL::PocketFFT' if _fd();
-        return 'PDL::FFTW3'     if _fftw3();
+        if (_fd()) {
+            # the choice of PDL::FFTDispatcher, whose default follows
+            # PDL_FFTDISPATCHER_BACKEND; the length check for PDL::FFT stays here
+            my $b = _fd_choice();
+            return $b unless $b eq 'PDL::FFT';
+        } elsif (_fftw3()) {
+            return 'PDL::FFTW3';
+        }
     }
     return 'PDL::FFT' if fft_ok($n);
     croak sprintf "PDL::EEG::FFT::Dispatcher: PDL::FFT cannot transform length %d (it splits it into %d factors, "
         . "its limit is %d) and %s", $n, $NF{$n}, $NFACTOR,
         $BACKEND eq 'pdl' ? "it is the only library allowed (\$PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl')"
-                          : 'neither PDL::FFTDispatcher nor PDL::FFTW3 is installed';
+      : _fd()             ? "PDL::FFTDispatcher chose it (\$PDL::FFTDispatcher::BACKEND = 'pdl', "
+                            . "e.g. from PDL_FFTDISPATCHER_BACKEND)"
+      :                     'neither PDL::FFTDispatcher nor PDL::FFTW3 is installed';
 }
 
 # ---------------------------------------------------------------------------
@@ -225,9 +245,12 @@ transforms length C<$n>; croaks as C<fft_inplace> does.
 
 =head2 $PDL::EEG::FFT::Dispatcher::BACKEND
 
-C<'auto'> (default): PDL::PocketFFT through L<PDL::FFTDispatcher> when it is
-installed, otherwise PDL::FFTW3 when it is installed, otherwise PDL::FFT for
-the lengths C<fft_ok> accepts and a croak for the others. C<'pocketfft'> uses
+C<'auto'> (default): when L<PDL::FFTDispatcher> is installed, the library it
+chooses: PDL::PocketFFT under its own default, or the one named by the
+environment variable C<PDL_FFTDISPATCHER_BACKEND> (e.g. C<fftw3> on a machine
+whose FFTW is built with SIMD); otherwise PDL::FFTW3 when it is installed;
+otherwise PDL::FFT. PDL::FFT is used only for the lengths C<fft_ok> accepts,
+and the others croak. C<'pocketfft'> uses
 PDL::PocketFFT and croaks when PDL::FFTDispatcher is not installed.
 C<'fftw3'> uses PDL::FFTW3 and croaks when it is not installed. C<'pdl'> uses
 PDL::FFT only (a croak for the lengths C<fft_ok> rejects).

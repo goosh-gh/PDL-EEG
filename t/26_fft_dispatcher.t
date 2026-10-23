@@ -1,5 +1,8 @@
 use strict;
 use warnings;
+# the cases below assume PDL::FFTDispatcher's own default; a machine-wide
+# PDL_FFTDISPATCHER_BACKEND would change it (it is set per case further down)
+BEGIN { delete $ENV{PDL_FFTDISPATCHER_BACKEND} }
 use Test::More;
 use PDL;
 use PDL::EEG::FFT::Dispatcher qw(fft_len fft_ok fft_backend fft_inplace ifft_inplace);
@@ -101,6 +104,23 @@ subtest "BACKEND 'auto': which library" => sub {
         skip 'PDL::FFTDispatcher not installed', 1 unless $HAVE_FD;
         is($child->($which, 'PDL::FFTW3'), "PDL::PocketFFT PDL::PocketFFT\n",
            "with PDL::FFTDispatcher: PDL::PocketFFT for every length");
+    }
+    # 'auto' follows PDL::FFTDispatcher's choice, which PDL_FFTDISPATCHER_BACKEND sets
+    SKIP: {
+        skip 'PDL::FFTDispatcher not installed', 3 unless $HAVE_FD;
+        local $ENV{PDL_FFTDISPATCHER_BACKEND} = 'pdl';
+        is($child->($which), "PDL::FFT croak\n",
+           "PDL_FFTDISPATCHER_BACKEND=pdl: PDL::FFT for 1000, croak for $BAD");
+        like($child->('print eval { fft_backend(' . $BAD . '); 1 } ? "ran\n" : $@'),
+             qr/PDL::FFTDispatcher chose it/, '... and the croak says why');
+        local $ENV{PDL_FFTDISPATCHER_BACKEND} = 'bogus';
+        like($child->('print eval { fft_backend(1000); 1 } ? "ran\n" : $@'),
+             qr/^PDL::EEG::FFT::Dispatcher: .*not 'bogus'/, 'an unknown name in the variable croaks');
+    }
+    SKIP: {
+        skip 'PDL::FFTDispatcher or PDL::FFTW3 not installed', 1 unless $HAVE_FD && $HAVE_FFTW3;
+        local $ENV{PDL_FFTDISPATCHER_BACKEND} = 'fftw3';
+        is($child->($which), "PDL::FFTW3 PDL::FFTW3\n", 'PDL_FFTDISPATCHER_BACKEND=fftw3: PDL::FFTW3');
     }
     local $PDL::EEG::FFT::Dispatcher::BACKEND = 'pdl';
     is(fft_backend(1000), 'PDL::FFT', "BACKEND 'pdl': PDL::FFT for 1000");
