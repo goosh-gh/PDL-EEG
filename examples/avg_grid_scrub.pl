@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 # examples/avg_grid_scrub.pl
 #
-#   perl examples/avg_grid_scrub.pl AVG.tsv [options]
+#   perl examples/avg_grid_scrub.pl AVG.tsv [MORE.tsv ...] [options]
 #
 #     --xlim A,B       time range [ms]                       (-250,800)
 #     --ylim A,B       amplitude range [uV], same in every panel   (auto)
@@ -16,9 +16,21 @@
 #     --no-map         waveforms only
 #     --png FILE       write the grid to FILE and exit (no window)
 #     --size W,H       window / image size in pixels          (1100,850)
+#     --cell LIST      extra channels placed in free cells, NAME:ROW:COL[,...]
+#                      (rows and columns from 0, e.g. BN1:4:0,BN2:4:4); a channel
+#                      without a position in the montage is left out of the map
+#     --names LIST     names of the files in the key, comma separated (the file names)
+#     --colors LIST    line colours, one per file, comma separated
+#                      (#1565C0, #9E9E9E, #C62828, #2E7D32, #6A1B9A, #EF6C00)
 #
 # AVG.tsv is a tab-separated average with a header row: time_ms, then one column
 # per channel (e.g. the PREFIX_avg_<ref>.tsv files of heartbeat_bne_survey.pl).
+# With more than one file, the waveforms of every file are drawn in the same
+# panels (the first file on top of the others is not guaranteed: it is drawn
+# first, so the read-out of an enlarged panel follows it), with a key in the top
+# right cell. The files must have the same time axis; a channel missing from a
+# later file is left out of that file's lines. The scalp map is that of the first
+# file.
 #
 # Shows the channels as a 5x5 grid laid out like the 10-20 system
 # (PDL::EEG::MAP2D::grid_layout_1020)
@@ -78,25 +90,42 @@ my ($NROWS, $NCOLS, @MAPCELL) = ($GRID->{nrows}, $GRID->{ncols}, @{ $GRID->{map}
 
 my ($xlim, $ylim, $posup, $mark, $png, $size) = ('-250,800', undef, 0, '', undef, '1100,850');
 my ($clim, $montage, $nomap, $cstep) = (undef, undef, 0, 1);
+my ($names, $colors, $cells) = ('', '', '');
 GetOptions('xlim=s' => \$xlim, 'ylim=s' => \$ylim, 'positive-up' => \$posup,
            'mark=s' => \$mark, 'png=s' => \$png, 'size=s' => \$size,
            'clim=f' => \$clim, 'montage=s' => \$montage, 'no-map' => \$nomap,
-           'cstep=f' => \$cstep) or die;
+           'cstep=f' => \$cstep, 'names=s' => \$names, 'colors=s' => \$colors, 'cell=s' => \$cells) or die;
+for my $c (split /,/, $cells) {
+    my ($nm, $r, $cc) = split /:/, $c;
+    defined $cc && $r =~ /^\d+$/ && $cc =~ /^\d+$/ && $r < $NROWS && $cc < $NCOLS
+        or die "--cell: '$c' is not NAME:ROW:COL inside the ${NROWS}x$NCOLS grid\n";
+    $CELL{$nm} = [$r, $cc];
+}
 $cstep > 0 or die "--cstep must be positive\n";
 $montage //= "$FindBin::Bin/../t/data/standard_1020_subset.elc";
 $nomap or -r $montage or die "montage $montage not readable: give --montage ELC or --no-map\n";
-my $file = shift @ARGV or die "usage: $0 AVG.tsv [options]\n";
+my @files = @ARGV or die "usage: $0 AVG.tsv [MORE.tsv ...] [options]\n";
+my $file  = $files[0];
+my @fname = $names ne '' ? split(/,/, $names) : map { basename($_) } @files;
+my @fcol  = $colors ne '' ? split(/,/, $colors) : ('#1565C0', '#9E9E9E', '#C62828', '#2E7D32', '#6A1B9A', '#EF6C00');
+@fname >= @files or die "--names: fewer names than files\n";
+@fcol  >= @files or die "--colors: fewer colours than files\n";
 my ($W, $H)   = split /,/, $size;
 my ($x0, $x1) = split /,/, $xlim;
 my @mark      = split /,/, $mark;
 
-open my $fh, '<', $file or die "$file: $!";
-chomp(my $head = <$fh>);
-my (undef, @labels) = split /\t/, $head;
-my @rows;
-while (<$fh>) { chomp; next unless length; push @rows, [ split /\t/ ] }
-close $fh;
-my $M = pdl(\@rows);                              # (ncol, ntime)
+# ($M (ncol, ntime), @labels) of one average
+sub read_avg {
+    my $f = shift;
+    open my $fh, '<', $f or die "$f: $!";
+    chomp(my $head = <$fh>);
+    my (undef, @lab) = split /\t/, $head;
+    my @rows;
+    while (<$fh>) { chomp; next unless length; push @rows, [ split /\t/ ] }
+    close $fh;
+    return (pdl(\@rows), @lab);
+}
+my ($M, @labels) = read_avg($file);              # (ncol, ntime)
 my $t = $M->slice("(0)");
 
 # channels that have a grid cell, in the order their panels are created; the
@@ -105,14 +134,52 @@ my @show = grep { exists $CELL{ $labels[$_] } } 0 .. $#labels;
 @show or die "no channel of $file has a grid position\n";
 my @y    = map { $M->slice("(" . ($_ + 1) . ")") } @show;
 my @name = @labels[@show];
+# the other files: $yo[$f][$k] is the waveform of channel $name[$k] (undef if missing)
+my @yo;
+for my $f (1 .. $#files) {
+    my ($Mf, @lf) = read_avg($files[$f]);
+    $Mf->dim(1) == $t->nelem && ($Mf->slice("(0)") - $t)->abs->max < 1e-6
+        or die "$files[$f]: time axis differs from $file\n";
+    my %col; @col{@lf} = 1 .. @lf;
+    $yo[$f] = [ map { exists $col{$_} ? $Mf->slice("($col{$_})") : undef } @name ];
+}
 my ($y0, $y1) = $ylim ? (split /,/, $ylim) : do {
     my $in = which(($t >= $x0) & ($t <= $x1));
-    my $m  = 1.05 * pdl(map { $_->index($in)->abs->max } @y)->max->sclr;
+    my $m  = 1.05 * pdl(map { $_->index($in)->abs->max } @y, grep { defined } map { @{ $yo[$_] } } 1 .. $#files)->max->sclr;
     (-$m, $m);
 };
+# all lines of channel $k into $ax (the first file first)
+sub lines_of {
+    my ($ax, $k, $lw) = @_;
+    $ax->line($t, $y[$k], color => $fcol[0], lw => $lw);
+    for my $f (1 .. $#files) {
+        $ax->line($t, $yo[$f][$k], color => $fcol[$f], lw => $lw) if defined $yo[$f][$k];
+    }
+}
+# key of the files (two or more), drawn into $ax
+sub draw_key {
+    my $ax = shift;
+    $ax->{_scrub_skip} = 1;
+    $ax->axis('off');
+    $ax->xlim(0, 10);
+    $ax->set_ylim(0, @files + 1);
+    for my $f (0 .. $#files) {
+        my $yk = @files - $f;
+        $ax->line(pdl(0.3, 2.0), pdl($yk, $yk), color => $fcol[$f], lw => 2);
+        $ax->text(2.4, $yk, $fname[$f], ha => 'left', halign => 'left', va => 'center',
+                  valign => 'center', fontsize => 10, color => 'black');
+    }
+}
+my $KEYCELL = [0, $NCOLS - 1];
+my $key_index = @files > 1 ? @show + ($nomap ? 0 : 1) : -1;   # panel index of the key
 
-my $Y    = cat(@y);                                # (ntime, nshow)
 my $mon  = $nomap ? undef : PDL::EEG::IO::ASA::read_elc($montage);
+# the channels of the map: those with a position in the montage (aliases T3..T6
+# as plot_topomap resolves them)
+my %ALIAS_ELC = (T3 => 'T7', T4 => 'T8', T5 => 'P7', T6 => 'P8');
+my @mapk = $nomap ? () : grep { my $n = $name[$_];
+    exists $mon->{pos}{$n} || (exists $ALIAS_ELC{$n} && exists $mon->{pos}{ $ALIAS_ELC{$n} }) } 0 .. $#name;
+my $Y    = cat(@y[@mapk ? @mapk : 0 .. $#y]);         # (ntime, nmap)
 # figure title: the data file and, when a map is drawn, the montage file
 my $title = $file . ($nomap ? '' : '    montage: ' . basename($montage));
 
@@ -127,7 +194,7 @@ sub draw_map {
     # shorter than one step
     my $lim = $clim // do { my $n = POSIX::ceil($v->abs->max->sclr / $cstep - 1e-9);
                             ($n < 1 ? 1 : $n) * $cstep };
-    plot_topomap(values => $v, labels => \@name, montage => $mon,
+    plot_topomap(values => $v, labels => [ @name[@mapk] ], montage => $mon,
                  clim => $lim, contours => 0, names => 0, sensor_size => 3, res => $res,
                  title => '', _ax => $ax, _fig => $fig,
                  colorbar => { location => 'right', tick_step => $cstep, %cbar });
@@ -164,7 +231,7 @@ my $grid_render = sub {
     for my $k (0 .. $#show) {
         my ($row, $col) = @{ $CELL{ $name[$k] } };
         my $ax = $fig->add_subplot($gs->at($row, $col));
-        $ax->line($t, $y[$k], color => '#1565C0', lw => 0.9);
+        lines_of($ax, $k, 0.9);
         style($ax);
         # channel name inside the panel, at the top-left corner
         $ax->text($x0 + 0.03 * ($x1 - $x0), ($posup ? $y1 : $y0) + ($posup ? -1 : 1) * 0.04 * ($y1 - $y0),
@@ -180,6 +247,8 @@ my $grid_render = sub {
         draw_map($fig, $fig->add_subplot($gs->at(@MAPCELL)), $lat, 110,
                  width => 7, pad => 2, length => 0.8, reserve => 0) if defined $lat;
     }
+    # the key comes last, after the map panel
+    draw_key($fig->add_subplot($gs->at(@$KEYCELL))) if @files > 1;
     $fig->label_only($fig->axes_list->[$numbered]);
     $fig->suptitle($title, fontsize => 11);
     return $fig;
@@ -188,6 +257,10 @@ my $grid_render = sub {
 my $cell_render = sub {
     my ($k, $state, $w, $h) = @_;
     my $fig = figure(width => $w, height => $h);
+    if ($k == $key_index) {                    # the key was double-clicked
+        draw_key($fig->axes);
+        return $fig;
+    }
     if ($k > $#show) {                         # the map panel was double-clicked
         # The driver puts its read-out and marker on the lines of the first
         # panel; an empty first panel keeps them off the head outline.
@@ -200,7 +273,7 @@ my $cell_render = sub {
         return $fig;
     }
     my $ax  = $fig->axes;
-    $ax->line($t, $y[$k], color => '#1565C0', lw => 1.3);
+    lines_of($ax, $k, 1.3);
     style($ax);
     $ax->set_title($name[$k]);
     $ax->set_xlabel('time [ms]');
@@ -227,5 +300,5 @@ $drv->show_grid_scrub(
     vline       => { color => [0.78, 0.16, 0.16], lw => 1.2 },
     marker      => { color => [0.78, 0.16, 0.16], ms => 8, marker => 'o' },
     readout     => sub { my ($x, $yv) = @_; sprintf("%.0f ms\n%+.2f uV", $x, $yv) },
-    cell_title  => sub { $_[0] > $#show ? 'scalp map' : $name[ $_[0] ] },
+    cell_title  => sub { $_[0] == $key_index ? 'key' : $_[0] > $#show ? 'scalp map' : $name[ $_[0] ] },
 );

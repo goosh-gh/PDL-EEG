@@ -28,12 +28,21 @@ use PDL::EEG::IO::EDF         qw(write_edf);
 #   --recording STR    local recording identification
 #   --equipment STR    acquisition equipment string (default: vendor + device,
 #                      e.g. Nihon_Kohden_EEG-1200A_V01.00)
+#   --rename SPEC      rename channels before writing, for recordings where an input
+#                      named after a 10-20 site carried an electrode elsewhere.
+#                      SPEC is "OLD=NEW,OLD=NEW" or a file: a TSV whose first two
+#                      columns are OLD and NEW (more columns, e.g. the site, are
+#                      ignored; '#' starts a comment, a header line "recorded ..." is
+#                      skipped). Every OLD must be in the file, and no NEW may equal
+#                      a label that stays. Applies to every mode.
+#                      e.g. --rename YJ0394VB_rename.tsv
 
 my %opt = (phys => 'auto', plain => 0, allblocks => 0, subject => '', recording => '',
-           equipment => undef, gapsamples => 100);
+           equipment => undef, gapsamples => 100, rename => undef);
 GetOptions(\%opt, 'plain', 'phys=s', 'allblocks', 'blocks=s', 'cut=s', 'cutclock|cut-clock=s',
-                  'subject|patient=s', 'recording=s', 'equipment=s', 'gapsamples=i')
+                  'subject|patient=s', 'recording=s', 'equipment=s', 'gapsamples=i', 'rename=s')
     or die "bad options\n";
+my %RENAME = defined $opt{rename} ? parse_rename($opt{rename}) : ();
 
 my $in  = shift @ARGV or die "usage: $0 INPUT.EEG [OUTPUT.edf] [--options]\n";
 my $out = shift @ARGV;
@@ -55,6 +64,55 @@ sub write_one {
         equipment => $opt{equipment});
     printf "wrote %s (%s): %d ch x %d samp\n",
         $path, ($opt{plain} ? 'EDF' : 'EDF+C'), $rec->{data}->dim(0), $rec->{data}->dim(1);
+}
+
+# --rename: "OLD=NEW,..." or a TSV file (first two columns OLD, NEW)
+sub parse_rename {
+    my $spec = shift;
+    my @pairs;
+    if (-f $spec) {
+        open my $fh, '<', $spec or die "$spec: $!\n";
+        while (my $l = <$fh>) {
+            $l =~ s/#.*//; $l =~ s/\s+$//;
+            next unless $l =~ /\S/;
+            my ($old, $new) = map { s/^\s+|\s+$//gr } (split /\t/, $l)[0, 1];
+            next if lc $old eq 'recorded';                     # header line
+            die "$spec: line '$l' has no second column (columns are tab-separated)\n"
+                unless defined $new && length $new;
+            push @pairs, [ $old, $new ];
+        }
+    } else {
+        for my $p (split /\s*,\s*/, $spec) {
+            my ($old, $new) = split /=/, $p, 2;
+            die "--rename: '$p' is not OLD=NEW\n" unless defined $new && length $old && length $new;
+            push @pairs, [ $old, $new ];
+        }
+    }
+    my (%m, %to);
+    for (@pairs) {
+        my ($old, $new) = @$_;
+        die "--rename: $old given twice\n" if exists $m{$old};
+        die "--rename: two channels renamed to $new\n" if $to{$new}++;
+        length $new <= 16 or die "--rename: '$new' is longer than the 16 characters of an EDF label\n";
+        $m{$old} = $new;
+    }
+    return %m;
+}
+sub rename_channels {
+    my $rec = shift;
+    return unless %RENAME;
+    my @lab = @{ $rec->{labels} };
+    my %have = map { $_ => 1 } @lab;
+    for my $old (sort keys %RENAME) {
+        die "--rename: no channel '$old' in $in (channels: @lab)\n" unless $have{$old};
+    }
+    for my $new (values %RENAME) {
+        die "--rename: '$new' is already a channel that is not renamed\n"
+            if $have{$new} && !exists $RENAME{$new};
+    }
+    my @newlab = map { exists $RENAME{$_} ? $RENAME{$_} : $_ } @lab;
+    $rec->{labels} = \@newlab;
+    print "  renamed: ", join(', ', map { "$_ -> $RENAME{$_}" } grep { exists $RENAME{$_} } @lab), "\n";
 }
 
 # block spec parser: "2,3" | "1-4" | "0,2-3" | "all" (0-based)
@@ -79,6 +137,7 @@ sub parse_blocks {
 # ----- cut mode: arbitrary ranges (data-coordinate or wall-clock) ------------
 if (defined $opt{cut} || defined $opt{cutclock}) {
     my $rec = read_nk($in, all_blocks => 1, gap_samples => 0);
+    rename_channels($rec);
     my $fs  = $rec->{fs};
     my $n   = $rec->{data}->dim(1);
     printf "read %s : %s [%s], %d ch @ %g Hz, %.1f s data\n",
@@ -126,6 +185,7 @@ if (defined $opt{cut} || defined $opt{cutclock}) {
 # ----- block-per-file mode ---------------------------------------------------
 if (defined $opt{blocks}) {
     my $rec = read_nk($in, all_blocks => 1, gap_samples => 0);  # clean boundaries
+    rename_channels($rec);
     printf "read %s : %s [%s], %d ch @ %g Hz\n",
         $in, ($rec->{device}//'?'), ($rec->{layout}//'?'), $rec->{data}->dim(0), $rec->{fs};
 
@@ -153,6 +213,7 @@ if (defined $opt{blocks}) {
 # ----- single-EDF mode (default / --allblocks) -------------------------------
 my $rec = read_nk($in,
     $opt{allblocks} ? (all_blocks => 1, gap_samples => $opt{gapsamples}) : ());
+rename_channels($rec);
 
 printf "read %s\n  format : %s [%s]\n  signal : %d ch x %d samp @ %g Hz\n  events : %d\n",
     $in, ($rec->{device} // '?'), ($rec->{layout} // '?'),
