@@ -71,6 +71,12 @@ Revision history for PDL-EEG
       time-domain convolution, trials together vs one at a time, block
       size independence.
   ADDED
+    - examples/nyhead_alpha_sim.pl: a pure posterior alpha rhythm on the New
+      York Head (equivalent dipoles at one or several sites per hemisphere,
+      orientations swept or moments drawn, kept when the map on the 19 10-20
+      channels looks like a posterior alpha rhythm), projected to the NYHead
+      electrodes and to own points by PDL::IO::NYHead::Interp, written as EDF
+      per reference.
     - PDL::EEG::Heartbeat::Respiration: phase_template and
       phase_template_multi (phase at the beats re-estimated against a
       Fourier template of one breath, by a local grid search on the beat
