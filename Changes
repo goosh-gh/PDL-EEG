@@ -2,6 +2,11 @@ Revision history for PDL-EEG
 
 0.05  (unreleased)
   CHANGED
+    - t/data: the synthetic Nihon Kohden fixtures (test01.eeg, test01.LOG,
+      test02.eeg, test03.eeg) and the real Nihon Kohden display pattern
+      Pattern_032.PTN are no longer tracked. t/00_testdata.t writes the
+      synthetic ones with t/mk_synthetic_nk.pl when any is missing; t/03_ptn
+      checks the real .PTN only when it is present.
     - Tests and examples seed through PDL::EEG::SynthNoise::seed_rng
       (t/04, t/05, t/16, t/19, t/21, examples/sep_hfo_tfa.pl,
       examples/ged_vs_ica_blink.pl). A bare srand seeds PDL's generator
@@ -71,6 +76,19 @@ Revision history for PDL-EEG
       time-domain convolution, trials together vs one at a time, block
       size independence.
   ADDED
+    - PDL::EEG::ElectrodeLocation::Polyline: arc length, points at lengths or
+      fractions, projection onto a 2-D or 3-D polyline; midline labels and
+      fractions of the 10-20 and 10-10 systems.
+    - PDL::EEG::ElectrodeLocation::TraceLine: the ordered, smoothed centre line
+      of a line drawn on an image (Zhang-Suen thinning on the line pixels only,
+      the longest path of the largest skeleton component).
+    - examples/trace_midline.pl: midline electrode positions along a line traced
+      on an image, as TSV and PNG (--length-mm, --background, --no-labels,
+      --no-marks, --no-line).
+    - examples/nyhead_alpha_sim.pl: --falloff (alpha amplitude or power relative
+      to O1 against the distance from the nearest electrode to the source, from
+      the nearest dipole, and along the midline; TSV and PNG per reference).
+    - t/00_testdata.t, t/35_electrode_location.t.
     - examples/nyhead_alpha_sim.pl: a pure posterior alpha rhythm on the New
       York Head (equivalent dipoles at one or several sites per hemisphere,
       orientations swept or moments drawn, kept when the map on the 19 10-20

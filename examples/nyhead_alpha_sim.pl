@@ -69,6 +69,24 @@
 #   --phase-rl DEG   phase of the right hemisphere against the left                            (0)
 #   --method K:N     interpolation of the own points (PDL::IO::NYHead::Interp)             (r3:all)
 #   --strings S      auto | h5dump | lowlevel
+#   --falloff PREFIX with --source dipole: how the alpha power falls off with distance, for the
+#                    kept configurations.  d = the electrode nearest to the left parieto-occipital
+#                    dipole.  For every channel (NYHead electrodes and own points) and each
+#                    --falloff-refs reference: the power relative to O1 in that reference
+#                    (((V_c - V_ref) / (V_O1 - V_ref))^2, one value per kept configuration; median and
+#                    10 .. 90 %), against three distances: the straight distance from d, the straight
+#                    distance from the nearest dipole, and, for the midline channels (|x| < 3 mm),
+#                    the length along the midline of the head surface (/sa/head cut by x = 0, from the
+#                    front to Iz, continued down the neck by the profile rows of --points) from the
+#                    projection of d, negative towards the front (left out for a channel more than
+#                    15 mm from that line).  Writes PREFIX_falloff.tsv and,
+#                    with PDL::Graphics::Cairo, PREFIX_falloff_d.png, PREFIX_falloff_src.png and
+#                    PREFIX_falloff_midline.png (linear axes, one column per reference; the lower row
+#                    is the same with the y axis enlarged, for the far channels)
+#   --falloff-refs LIST                                                          (Fpz,BN1,Cv45)
+#   --falloff-y Y    amp: the amplitude relative to O1, |V_c - V_ref| / |V_O1 - V_ref|, or
+#                    power: its square (the TSV has both)                                 (amp)
+#   --falloff-zoom Y upper end of the y axis of the lower row                    (0.25 amp, 0.05 power)
 #
 # The leadfield holds cortical sources only and is stored against the average of the 231
 # electrodes, so the true zero (a reference at infinity) is not known in this model; an alpha
@@ -91,7 +109,8 @@ my %o = (mat => "$ENV{HOME}/src/NYHead/sa_nyhead.mat", points => undef, point =>
          ndir => 2000, orient => undef, sites => 'POS;Intracalcarine Cortex;Occipital Pole;Lateral Occipital Cortex, inferior division;Lateral Occipital Cortex, superior division',
          crit_ref => 'BN1', batch => 2000, target_kept => 500, max_draws => 100000, seed => 1, freq => 10, dur => 30, fs => 500, amp_uv => 50, amp_ch => 'O1',
          pos => 'Cuneal Cortex|Precuneous Cortex', calc => 'Intracalcarine Cortex', gap => 5, w_pos => 1,
-         w_calc => 0.5, phase_rl => 0, method => 'r3:all', strings => 'auto', selftest => 0);
+         w_calc => 0.5, phase_rl => 0, method => 'r3:all', strings => 'auto', selftest => 0,
+         falloff => undef, falloff_refs => 'Fpz,BN1,Cv45', falloff_y => 'amp', falloff_zoom => undef);
 GetOptions('mat=s' => \$o{mat}, 'points=s' => \$o{points}, 'point=s@' => $o{point}, 'out=s' => \$o{out},
            'refs=s' => \$o{refs}, 'far=s' => \$o{far}, 'channels=s' => \$o{channels}, 'source=s' => \$o{source},
            'ndir=i' => \$o{ndir}, 'orient=s' => \$o{orient}, 'sites=s' => \$o{sites}, 'crit-ref=s' => \$o{crit_ref},
@@ -99,7 +118,8 @@ GetOptions('mat=s' => \$o{mat}, 'points=s' => \$o{points}, 'point=s@' => $o{poin
            'fs=i' => \$o{fs}, 'amp-uv=f' => \$o{amp_uv}, 'amp-ch=s' => \$o{amp_ch}, 'pos=s' => \$o{pos},
            'calc=s' => \$o{calc}, 'gap=f' => \$o{gap}, 'w-pos=f' => \$o{w_pos}, 'w-calc=f' => \$o{w_calc},
            'phase-rl=f' => \$o{phase_rl}, 'method=s' => \$o{method}, 'strings=s' => \$o{strings},
-           'selftest' => \$o{selftest})
+           'selftest' => \$o{selftest}, 'falloff=s' => \$o{falloff}, 'falloff-refs=s' => \$o{falloff_refs},
+           'falloff-y=s' => \$o{falloff_y}, 'falloff-zoom=f' => \$o{falloff_zoom})
     or die "bad options (see the header of $0)\n";
 if ($o{selftest}) { exit(selftest() ? 0 : 1) }
 -f $o{mat} or die "not found: $o{mat} (give it with --mat)\n";
@@ -142,6 +162,7 @@ my @pname = map { $_->[0] } @pts;
 my @patch = patches(\%o, $vc, $hoi, $ho);                        # [name, hemi, vertices, weight]
 my $map;
 if ($o{source} eq 'patch') {
+    print "--falloff needs --source dipole, left out\n" if defined $o{falloff};
     my $L = $ny->leadfield;                                      # (231,74382)
     $map = zeroes(double, scalar @lab, 2);
     for my $p (@patch) {
@@ -150,7 +171,7 @@ if ($o{source} eq 'patch') {
     }
 } else {
     my @sites = split /;/, $o{sites};
-    my (@GL, @GR, @sname);
+    my (@GL, @GR, @sname, @srcpos);
     print "\n-- equivalent dipoles (at the vertex nearest to the centroid of each site)\n";
     my $Vf = $ny->leadfield_full;                                # (231,74382,3)
     for my $site (@sites) {
@@ -171,12 +192,20 @@ if ($o{source} eq 'patch') {
             printf "  %-5s %-45s vertex %5d (%6.1f %6.1f %6.1f), %s\n", qw(left right)[$h], $site, $v, $vc->slice("($v),")->list,
                 $ny->area_of_vertex($v) // '?';
             push @{ $h ? \@GR : \@GL }, $Vf->slice(":,($v),:")->double->copy;   # (231,3)
+            push @srcpos, [ qw(L R)[$h] . " $site", $vc->slice("($v),")->copy ];
         }
         push @sname, $site;
     }
     undef $Vf;
     my $ex = explore(\%o, \@lab, \@i19, \@GL, \@GR, \@sname, drawer(\%o, scalar @sites), $W, \@pname, \%flag);
     $map = cat($ex->{mapL}, $ex->{mapR})->copy;                  # (231,2)
+    if (defined $o{falloff}) {
+        my $hd = $ny->surface('head');
+        my %at; @at{@lab} = 0 .. $#lab;
+        my $front = exists $at{Nz} ? 'Nz' : 'Fpz';
+        my $mid = midline_profile($hd->{vc}->double, $hd->{tri0}, $E->slice("($at{Iz}),"), $E->slice("($at{$front}),"), read_profile(\%o));
+        falloff(\%o, \@lab, $E, \@pts, $ex->{val}, \@srcpos, $mid);
+    }
 }
 
 my %ch = (map { $lab[$_] => $map->slice("($_),") } 0 .. $#lab);
@@ -441,6 +470,242 @@ sub dist2 {                                                      # (na,3), (nb,3
     return $d;
 }
 
+# =====================================================================================
+# read_profile: the back-midline profile rows of --points (kind profile_mesh / profile_extended,
+# in file order), as (n,3), or undef
+sub read_profile {
+    my ($opt) = @_;
+    return undef unless defined $opt->{points};
+    open my $fh, '<', $opt->{points} or die "$opt->{points}: $!\n";
+    my (@col, @r);
+    while (my $l = <$fh>) {
+        chomp $l;
+        next if $l =~ /^\s*(#|$)/;
+        my @f = split /\t/, $l;
+        if (!@col) { @col = map { lc } @f; next }
+        my %h; @h{@col} = @f;
+        push @r, [ @h{qw(x y z)} ] if defined $h{kind} && $h{kind} =~ /^profile_/;
+    }
+    return @r ? pdl(\@r)->transpose->copy : undef;               # (n,3)
+}
+
+# midline_profile($vc (nv,3), $tri0 (nf,3), $iz (3), $front (3), $neck (n,3) or undef)
+#   The cut of the head surface by the plane x = 0, ordered by the angle around its centroid in the
+#   (y, z) plane, from 5 deg below $front over the top to $iz, continued by the $neck rows.
+#   Returns { yz => (np,2), len => (np) } (length along it from the front end, mm).
+sub midline_profile {
+    my ($vc, $tri, $iz, $front, $neck) = @_;
+    my @cut;
+    for my $e ([0, 1], [1, 2], [2, 0]) {                         # the three edges of every triangle
+        my $va = $vc->dice_axis(0, $tri->slice(":,($e->[0])"));   # (nf,3)
+        my $vb = $vc->dice_axis(0, $tri->slice(":,($e->[1])"));
+        my ($xa, $xb) = ($va->slice(':,(0)'), $vb->slice(':,(0)'));
+        my $w = which($xa * $xb < 0);                             # edges that cross x = 0
+        next if $w->isempty;
+        my $t = ($xa->index($w) / ($xa->index($w) - $xb->index($w)))->dummy(1);
+        push @cut, ($va->dice_axis(0, $w) + $t * ($vb->dice_axis(0, $w) - $va->dice_axis(0, $w)))->slice(':,1:2');
+    }
+    @cut or die "midline_profile: the plane x = 0 does not cut the head surface\n";
+    my $P = $cut[0]; $P = $P->glue(0, $_) for @cut[1 .. $#cut];  # (nc,2): y, z
+    my $c = $P->average;                                         # (2): over the points (dim 0)
+    my $ang = sub {                                              # angle in degrees, 0 = front, 90 = top, back > 90
+        my ($y, $z) = @_;
+        my $deg = atan2($z - $c->at(1), $y - $c->at(0)) * 180 / $PI;
+        return $deg + 360 * ($deg < -100);
+    };
+    my $A  = $ang->($P->slice(':,(0)'), $P->slice(':,(1)'));     # (nc)
+    my $ai = $ang->($iz->at(1), $iz->at(2));
+    my $af = $ang->($front->at(1), $front->at(2)) - 5;
+    my $sel = which(($A > $af) * ($A <= $ai));
+    $sel->nelem > 3 or die "midline_profile: too few points between the front and Iz\n";
+    my $Q = $P->dice_axis(0, $sel->index($A->index($sel)->qsorti));   # front -> top -> Iz
+    $Q = $Q->glue(0, $neck->slice(':,1:2')) if defined $neck;
+    my $seg = sqrt(((($Q->slice('1:-1,:') - $Q->slice('0:-2,:'))**2)->mv(1, 0)->sumover));   # over y, z (dim 1)
+    my $len = pdl(0)->append($seg->cumusumover);
+    return { yz => $Q, len => $len, centre => $c };
+}
+
+# along_midline($mid, $p (3)) -> (length along the profile, distance from it): the nearest point of
+# the polyline to the (y, z) of $p
+sub along_midline {
+    my ($mid, $p) = @_;
+    my $Q = $mid->{yz};
+    my $A = $Q->slice('0:-2,:'); my $B = $Q->slice('1:-1,:');
+    my $AB = $B - $A;
+    my $q  = $p->slice('1:2');
+    my $l2 = ($AB**2)->mv(1, 0)->sumover;                        # (ns): over y, z (dim 1)
+    my $t  = ((($q->dummy(0) - $A) * $AB)->mv(1, 0)->sumover / $l2->clip(1e-12, undef))->clip(0, 1);
+    my $X  = $A + $t->dummy(1) * $AB;                            # (ns,2)
+    my $dd = sqrt((($X - $q->dummy(0))**2)->mv(1, 0)->sumover);
+    my $k  = $dd->minimum_ind->sclr;
+    return ($mid->{len}->at($k) + $t->at($k) * sqrt($l2->at($k)), $dd->at($k));
+}
+
+# falloff: alpha power against distance, for the kept configurations ($val: name -> (nk) values)
+sub falloff {
+    my ($opt, $lab, $E, $pts, $val, $src, $mid) = @_;
+    my %pos = map { $lab->[$_] => $E->slice("($_),") } 0 .. $#$lab;
+    $pos{ $_->[0] } = pdl(@$_[1 .. 3]) for @$pts;
+    my @names = grep { exists $val->{$_} && exists $pos{$_} } (@$lab, map { $_->[0] } @$pts);
+    my %isp = map { $_->[0] => 1 } @$pts;
+    my @refs = grep { exists $val->{$_} or do { print "  --falloff-refs: no channel $_, left out\n"; 0 } } split /,/, $opt->{falloff_refs};
+    exists $val->{O1} or die "falloff: no O1\n";
+    my $P  = cat(map { $pos{$_} } @names);                       # (3,n)
+    my $dist_to = sub { sqrt((($P - $_[0]->dummy(1))**2)->sumover) };   # (n): over x, y, z (dim 0)
+    # d: the electrode nearest to the left parieto-occipital dipole (else the first source)
+    my ($s0) = grep { $_->[0] =~ /^L POS$/ } @$src; $s0 //= $src->[0];
+    my $de = zeroes(double, scalar @$lab);
+    $de += ($E->slice(":,($_)") - $s0->[1]->at($_))**2 for 0 .. 2;
+    my $dname = $lab->[ sqrt($de)->minimum_ind->sclr ];
+    print "\n-- falloff: d = $dname, the electrode nearest to the dipole $s0->[0] (", join(' ', map { sprintf '%.1f', $_ } $s0->[1]->list), ")\n";
+    print "  nearest electrode of every dipole:\n";
+    for my $s (@$src) {
+        my $d2 = zeroes(double, scalar @$lab);
+        $d2 += ($E->slice(":,($_)") - $s->[1]->at($_))**2 for 0 .. 2;
+        my $j = $d2->minimum_ind->sclr;
+        printf "    %-48s %-6s %5.1f mm\n", $s->[0], $lab->[$j], sqrt($d2->at($j));
+    }
+    my $xd = $dist_to->($pos{$dname});
+    my $xs = cat(map { $dist_to->($_->[1]) } @$src)->mv(1, 0)->minimum;   # (n): nearest dipole (over dim 1)
+    my ($sd) = along_midline($mid, $pos{$dname});
+    my (@xm, @offm);
+    for my $n (@names) {
+        my ($l, $o) = abs($pos{$n}->at(0)) < 3 ? along_midline($mid, $pos{$n}) : ();
+        if (defined $o && $o <= 15) { push @xm, $l - $sd; push @offm, $o }   # off the profile (beyond its ends): none
+        else { push @xm, undef; push @offm, undef }
+    }
+    # relative power per reference: one value per kept configuration
+    my (%rp, %ra);                                               # ref -> name -> [median, p10, p90]: power, amplitude
+    for my $r (@refs) {
+        my $den = $val->{O1} - $val->{$r};
+        for my $n (@names) {
+            next if $n eq $r;
+            my $amp = (($val->{$n} - $val->{$r}) / $den)->abs;   # (nk)
+            for my $pair ([ \%rp, $amp**2 ], [ \%ra, $amp ]) {
+                my $v = $pair->[1]->qsort;
+                my $k = $v->nelem - 1;
+                $pair->[0]{$r}{$n} = [ map { $v->at(int($_ * $k + 0.5)) } 0.5, 0.1, 0.9 ];
+            }
+        }
+    }
+    # TSV
+    my $tsv = "$opt->{falloff}_falloff.tsv";
+    open my $fo, '>', $tsv or die "$tsv: $!";
+    print $fo "# nyhead_alpha_sim.pl --falloff: d = $dname; power relative to O1 in each reference, over the kept configurations\n";
+    print $fo join("\t", qw(name kind x y z dist_d_mm dist_dipole_mm midline_mm midline_off_mm),
+                   (map { ("${_}_pow_median", "${_}_pow_p10", "${_}_pow_p90") } @refs),
+                   (map { ("${_}_amp_median", "${_}_amp_p10", "${_}_amp_p90") } @refs)), "\n";
+    for my $i (0 .. $#names) {
+        my $n = $names[$i];
+        print $fo join("\t", $n, $isp{$n} ? 'point' : 'electrode', map({ sprintf '%.1f', $_ } $pos{$n}->list),
+                       sprintf('%.1f', $xd->at($i)), sprintf('%.1f', $xs->at($i)),
+                       defined $xm[$i] ? (sprintf('%.1f', $xm[$i]), sprintf('%.1f', $offm[$i])) : ('', ''),
+                       (map { my $v = $rp{$_}{$n}; $v ? map({ sprintf '%.4g', $_ } @$v) : ('', '', '') } @refs),
+                       (map { my $v = $ra{$_}{$n}; $v ? map({ sprintf '%.4g', $_ } @$v) : ('', '', '') } @refs)), "\n";
+    }
+    close $fo;
+    print "  wrote $tsv\n";
+    # table of the labelled channels
+    my @lab_show = grep { exists $pos{$_} } (qw(Fpz Fz Cz Pz POz Oz O1 Iz Exxz Nk2), map { $_->[0] } @$pts);
+    my %ix; @ix{@names} = 0 .. $#names;
+    my $ymode = $opt->{falloff_y} // 'amp';
+    $ymode =~ /^(amp|power)$/ or die "--falloff-y amp | power\n";
+    my $ry = $ymode eq 'amp' ? \%ra : \%rp;
+    printf "  %s relative to O1, median (10 .. 90 %%) over the kept configurations\n", $ymode eq 'amp' ? 'amplitude' : 'power';
+    printf "  %-6s %8s %8s %8s%s\n", 'chan', 'from d', 'dipole', 'midline', join('', map { sprintf '  %18s', "$_ (med 10..90)" } @refs);
+    for my $n (@lab_show) {
+        my $i = $ix{$n};
+        printf "  %-6s %8.1f %8.1f %8s%s\n", $n, $xd->at($i), $xs->at($i), defined $xm[$i] ? sprintf('%.1f', $xm[$i]) : '-',
+            join('', map { my $v = $ry->{$_}{$n}; $v ? sprintf('  %6.3f %5.3f..%5.3f', @$v) : sprintf('  %18s', '-') } @refs);
+    }
+    plot_falloff($opt, \@names, \%isp, $dname, \@refs, $ry, $ymode, $xd, $xs, \@xm);
+    return { d => $dname, names => \@names, rp => \%rp, ra => \%ra, xd => $xd, xs => $xs, xm => \@xm };
+}
+
+sub plot_falloff {
+    my ($opt, $names, $isp, $dname, $refs, $ry, $ymode, $xd, $xs, $xm) = @_;
+    my $ok = eval { require PDL::Graphics::Cairo; 1 };
+    if (!$ok) { print "  PDL::Graphics::Cairo not found: no PNG\n"; return }
+    my $zoom  = $opt->{falloff_zoom} // ($ymode eq 'amp' ? 0.25 : 0.05);
+    my $ylab  = $ymode eq 'amp' ? 'alpha amplitude / amplitude at O1' : 'alpha power / power at O1';
+    my %far   = map { $_ => 1 } (qw(Exxz Nk1 Nk2 Nk3 Nk4), grep { $isp->{$_} } @$names);   # labels that crowd at the far end
+    my %labelled = map { $_ => 1 } (qw(Fp1 Fp2 Fpz F7 F3 Fz F4 F8 T7 C3 Cz C4 T8 P7 P3 Pz P4 P8 O1 Oz O2 POz Iz), keys %far, $dname);
+    my @plots = ([ 'd', $xd, "straight distance from d = $dname (mm)", 0 ],
+                 [ 'src', $xs, 'straight distance from the nearest dipole (mm)', 0 ],
+                 [ 'midline', undef, "length along the midline from d = $dname (mm), front < 0", 1 ]);
+    for my $pl (@plots) {
+        my ($tag, $X, $xl, $midonly) = @$pl;
+        my ($fig, @rows) = PDL::Graphics::Cairo::subplots(2, scalar @$refs, width => 560 * @$refs, height => 900);
+        @rows = map { [$_] } @rows if @$refs == 1;              # one column: plain Axes per row
+        for my $k (0 .. $#$refs) {
+            my $r = $refs->[$k];
+            my (@x, @y, @n);
+            for my $i (0 .. $#$names) {
+                my $n = $names->[$i];
+                next unless $ry->{$r}{$n};
+                my $xv = $midonly ? $xm->[$i] : $X->at($i);
+                next unless defined $xv;
+                push @x, $xv; push @y, $ry->{$r}{$n}; push @n, $n;
+            }
+            next unless @x;
+            my @ord = sort { $x[$a] <=> $x[$b] } 0 .. $#x;
+            my ($xmin, $xmax) = ($x[ $ord[0] ], $x[ $ord[-1] ]);
+            my $ymax = (sort { $b <=> $a } map { $_->[2] } @y)[0] || 1;
+            my $pad = 0.04 * ($xmax - $xmin);
+            for my $row (0, 1) {
+                my $ax = $rows[$row][$k];
+                my $top = $row ? $zoom : undef;
+                if ($midonly) {                                  # the polyline, cut at the top of the enlarged row
+                    my @px = @x[@ord]; my @py = map { $_->[0] } @y[@ord];
+                    for my $q (0 .. $#px - 1) {
+                        my ($x0, $y0, $x1, $y1) = ($px[$q], $py[$q], $px[ $q + 1 ], $py[ $q + 1 ]);
+                        if (defined $top) {
+                            next if $y0 > $top && $y1 > $top;
+                            ($x0, $y0) = ($x0 + ($x1 - $x0) * ($top - $y0) / ($y1 - $y0), $top) if $y0 > $top;
+                            ($x1, $y1) = ($x0 + ($x1 - $x0) * ($top - $y0) / ($y1 - $y0), $top) if $y1 > $top;
+                        }
+                        $ax->line(pdl($x0, $x1), pdl($y0, $y1), color => 'gray', lw => 1);
+                    }
+                }
+                my @un = grep { !$labelled{ $n[$_] } } 0 .. $#x;
+                $ax->scatter(pdl(@x[@un]), pdl(map { $y[$_][0] } @un), color => 'gray', s => 2, alpha => 0.5) if @un;
+                my @lj = sort { $x[$a] <=> $x[$b] } grep { $labelled{ $n[$_] } } 0 .. $#x;
+                # left / right pairs that fall on the same spot get one label "L/R"
+                my %jof; @jof{ @n } = 0 .. $#n;
+                my (%text, %skip);
+                for my $pr ([qw(Fp1 Fp2)], [qw(F3 F4)], [qw(F7 F8)], [qw(C3 C4)], [qw(T7 T8)], [qw(P3 P4)], [qw(P7 P8)], [qw(O1 O2)], [qw(Nk3 Nk4)]) {
+                    my ($jl, $jr) = @jof{@$pr};
+                    next unless defined $jl && defined $jr;
+                    my $yspan = defined $top ? $top : $ymax;
+                    next unless abs($x[$jl] - $x[$jr]) <= 3 && abs($y[$jl][0] - $y[$jr][0]) <= 0.03 * $yspan;
+                    $text{$jl} = "$pr->[0]/$pr->[1]"; $skip{$jr} = 1;
+                }
+                my $nf = 0;                                      # far labels alternate up and down
+                for my $j (@lj) {
+                    my $col = $isp->{ $n[$j] } ? 'red' : $n[$j] eq $dname ? 'blue' : 'black';
+                    my ($lo, $hi) = ($y[$j][1], $y[$j][2]);
+                    $hi = $top if defined $top && $hi > $top;
+                    $ax->line(pdl($x[$j], $x[$j]), pdl($lo, $hi), color => $col, lw => 1) if !defined $top || $lo < $top;
+                    next if defined $top && $y[$j][0] > $top;
+                    $ax->scatter(pdl($x[$j]), pdl($y[$j][0]), color => $col, s => 4);
+                    my $span = defined $top ? $top : $ymax;
+                    my $dy = $far{ $n[$j] } ? (($nf++ % 2) ? 0.09 : 0.02) * $span : 0;   # two heights above the point
+                    $ax->text($x[$j], $y[$j][0] + $dy, ' ' . ($text{$j} // $n[$j]), fontsize => 9, color => $col, va => 'bottom') unless $skip{$j};
+                }
+                $ax->xlim($xmin - $pad, $xmax + 3 * $pad);
+                $ax->ylim(0, $top) if defined $top;
+                $ax->title(($row ? "enlarged (0 .. $zoom), " : '') . "reference $r" . ($r eq 'BN1' ? ' (extrapolated point)' : ''));
+                $ax->xlabel($xl);
+                $ax->ylabel("$ylab (reference $r)");
+                $ax->set_grid(1);
+            }
+        }
+        my $f = "$opt->{falloff}_falloff_$tag.png";
+        $fig->save($f);
+        print "  wrote $f\n";
+    }
+}
+
 sub read_points {
     my ($opt) = @_;
     my @p;
@@ -591,6 +856,54 @@ sub selftest {
     my ($e2) = $check_run->('two sites', [[-10, -65, 25], [-25, -80, 5]], batch => 300, target_kept => 60, max_draws => 30000, seed => 3);
     my ($e3) = $check_run->('two sites again', [[-10, -65, 25], [-25, -80, 5]], batch => 300, target_kept => 60, max_draws => 30000, seed => 3);
     $chk->($e2->{nkept} == $e3->{nkept} && ($e2->{mom}[1] - $e3->{mom}[1])->abs->max == 0, 'the same seed gives the same configurations');
+
+    # ---- falloff(): a sphere (R 90 mm, a latitude-longitude mesh turned by half a step so that no
+    #      vertex but the poles lies on x = 0), electrodes on the midline great circle at known
+    #      angles phi from the front (y = R cos phi, z = R sin phi) and two off it
+    my ($Rs, $nl, $nm) = (90, 90, 120);
+    my (@sv, @st);
+    for my $i (0 .. $nl) {
+        my $th = $PI * $i / $nl;
+        for my $j (0 .. $nm - 1) {
+            my $ph = 2 * $PI * ($j + 0.5) / $nm;
+            push @sv, [ $Rs * sin($th) * cos($ph), $Rs * sin($th) * sin($ph), $Rs * cos($th) ];
+        }
+    }
+    for my $i (0 .. $nl - 1) {
+        for my $j (0 .. $nm - 1) {
+            my ($v00, $v01, $v10, $v11) = ($i * $nm + $j, $i * $nm + ($j + 1) % $nm, ($i + 1) * $nm + $j, ($i + 1) * $nm + ($j + 1) % $nm);
+            push @st, [ $v00, $v10, $v11 ], [ $v00, $v11, $v01 ];
+        }
+    }
+    my $svc = pdl(\@sv)->transpose->copy; my $stri = pdl(long, \@st)->transpose->copy;
+    my %phi = (Fpz => 10, Fz => 50, Cz => 90, Pz => 130, Oz => 170, Iz => 190);
+    my @fl = ((sort { $phi{$a} <=> $phi{$b} } keys %phi), qw(O1 T7));
+    my %fpos = map { my $r = $phi{$_} * $PI / 180; $_ => [ 0, $Rs * cos($r), $Rs * sin($r) ] } keys %phi;
+    $fpos{O1} = [ -30, -80, 25 ]; $fpos{T7} = [ -88, 0, 10 ];
+    my $Ef = pdl(map { $fpos{$_} } @fl)->transpose->copy;          # (8,3)
+    my $mid = midline_profile($svc, $stri, $Ef->slice('(5),'), $Ef->slice('(0),'), undef);
+    my ($lc) = along_midline($mid, $Ef->slice('(2),'));             # Cz
+    my ($lo) = along_midline($mid, $Ef->slice('(4),'));             # Oz
+    my $want_arc = $Rs * 80 * $PI / 180;
+    $chk->(abs(($lo - $lc) - $want_arc) < 0.01 * $want_arc, sprintf 'midline length Cz -> Oz %.1f mm (great circle %.1f)', $lo - $lc, $want_arc);
+    # values: O1 = 2, Fpz = 0, Cz = 1, Oz = 3, Th12-like point = 0.5, two configurations (the second x 2)
+    my %fv = (O1 => pdl(2, 4), Fpz => pdl(0, 0), Fz => pdl(0.5, 1), Cz => pdl(1, 2), Pz => pdl(1.5, 3), Oz => pdl(3, 6),
+              Iz => pdl(2.5, 5), T7 => pdl(0.2, 0.4), Pt => pdl(0.5, 1));
+    my $fdir = File::Temp::tempdir(CLEANUP => 1);
+    my $src = [ [ 'L POS', pdl(0, -80, 40) ] ];                     # nearest electrode: Pz or Oz
+    my ($fout, $fr) = $quiet->(sub { falloff({ %o, falloff => "$fdir/f", falloff_refs => 'Fpz,Pt' }, \@fl, $Ef, [ [ 'Pt', 0, -60, -70 ] ], \%fv, $src, $mid) });
+    print $fout;
+    my $want_d = (sort { ($fpos{$a}[1] + 80)**2 + ($fpos{$a}[2] - 40)**2 + $fpos{$a}[0]**2 <=> ($fpos{$b}[1] + 80)**2 + ($fpos{$b}[2] - 40)**2 + $fpos{$b}[0]**2 } @fl)[0];
+    $chk->($fr->{d} eq $want_d, "falloff: d is the electrode nearest to the left POS dipole ($fr->{d})");
+    $chk->(abs($fr->{rp}{Fpz}{Oz}[0] - 2.25) < 1e-12 && abs($fr->{rp}{Fpz}{O1}[0] - 1) < 1e-12, 'relative power against Fpz: Oz (3/2)^2 = 2.25, O1 = 1');
+    $chk->(abs($fr->{ra}{Fpz}{Oz}[0] - 1.5) < 1e-12 && abs($fr->{ra}{Pt}{Fz}[0] - 0) < 1e-12, 'relative amplitude against Fpz: Oz 1.5; against Pt: Fz 0');
+    $chk->(abs($fr->{rp}{Pt}{Cz}[0] - 1 / 9) < 1e-12 && !$fr->{rp}{Pt}{Pt}, 'relative power against a point: Cz ((1 - 0.5)/(2 - 0.5))^2, the reference itself left out');
+    my %fi; @fi{ @{ $fr->{names} } } = 0 .. $#{ $fr->{names} };
+    $chk->(!defined $fr->{xm}[ $fi{T7} ] && !defined $fr->{xm}[ $fi{Pt} ] && defined $fr->{xm}[ $fi{Cz} ] && $fr->{xm}[ $fi{Fpz} ] < 0 && $fr->{xm}[ $fi{Iz} ] > 0,
+           'midline lengths only on the line (|x| < 3 mm, within 15 mm), negative towards the front');
+    $chk->(abs($fr->{xd}->at($fi{Oz}) - sqrt(((pdl(@{ $fpos{Oz} }) - pdl(@{ $fpos{$want_d} }))**2)->sum)) < 1e-9, 'distance from d');
+    $chk->(-s "$fdir/f_falloff.tsv", 'falloff TSV written');
+    $chk->(-s "$fdir/f_falloff_midline.png" || $fout =~ /no PNG/, 'falloff PNG written (or PDL::Graphics::Cairo absent)');
     print $ok ? "selftest passed\n" : "selftest FAILED\n";
     return $ok;
 }
